@@ -184,8 +184,18 @@ class MissionManager {
             mission.timers.throttleTimeoutActive = true;
             const replyChatId = mission.targetChatId; // Closure güvenliği: sabit chatId yakala
             this.scheduler.startThrottleTimeout(mission.id, throttleMs, async (mId) => {
-                mission.timers.throttleTimeoutActive = false;
+                // ⚠️ throttleTimeoutActive işlem bitene kadar true KALIR (yarış koşulu önlemi)
                 await this._processReply(mId, replyChatId);
+
+                // İşlem sırasında yeni mesaj geldiyse, kısa bekleyip tekrar işle
+                const drainMs = mission.isGroup ? 15000 : 5000;
+                while (mission.messageQueue && mission.messageQueue.length > 0 && mission.status === 'active') {
+                    console.log(`⏳ İşlem sırasında ${mission.messageQueue.length} yeni mesaj birikti (#${mission.id}). ${drainMs/1000}s beklenip işlenecek...`);
+                    await new Promise(r => setTimeout(r, drainMs));
+                    await this._processReply(mId, replyChatId);
+                }
+
+                mission.timers.throttleTimeoutActive = false; // Ancak tüm kuyruk boşaldıktan sonra serbest bırak
             });
         } else {
             console.log(`⏳ Mesaj havuza eklendi (#${mission.id}). Toplam: ${mission.messageQueue.length}`);
@@ -207,32 +217,57 @@ class MissionManager {
         const combinedMessage = mission.messageQueue.join('\n');
         mission.messageQueue = []; // Kuyruğu temizle
 
+        // ─────────────────────────────────────────────
+        // LLM Çağrısı (Retry Mekanizmalı)
+        // ─────────────────────────────────────────────
+        let llmResult = null;
+        const maxRetries = 2;
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                llmResult = await this.conversationEngine.generateReply(mission, combinedMessage);
+                break; // Başarılı, döngüden çık
+            } catch (error) {
+                if (attempt < maxRetries) {
+                    const waitSec = (attempt + 1) * 5;
+                    console.warn(`⚠️ Ollama hatası (#${mission.id}), ${waitSec}s sonra tekrar denenecek (deneme ${attempt + 1}/${maxRetries})...`);
+                    await new Promise(r => setTimeout(r, waitSec * 1000));
+                } else {
+                    console.error(`❌ Ollama ${maxRetries + 1} denemede de başarısız (#${mission.id}):`, error.message);
+                    // Mesajları geri kuyruğa koy (kaybolmasın)
+                    if (!mission.messageQueue) mission.messageQueue = [];
+                    mission.messageQueue.unshift(combinedMessage);
+                    console.log(`🔄 Mesajlar kuyruğa geri eklendi (#${mission.id}). Bir sonraki mesajda tekrar denenecek.`);
+                    return;
+                }
+            }
+        }
+
+        const { message, status, memberStatus } = llmResult;
+
+        // Gruptaki kişilerin durumunu güncelle ve logla
+        if (mission.isGroup && Object.keys(memberStatus || {}).length > 0) {
+            mission.memberStatus = { ...(mission.memberStatus || {}), ...memberStatus };
+            console.log(`👥 Grup Durum Matrisi (#${mission.id}):`, JSON.stringify(mission.memberStatus));
+        }
+
+        // Cevabı WhatsApp'tan gönder
+        await this.client.sendMessage(chatId, message);
+        console.log(`📤 Ajan cevabı (#${mission.id}): ${message}`);
+
+        // Görev durumunu kontrol et
+        if (status === 'completed') {
+            await this._completeMission(mission, 'completed');
+            return;
+        } else if (status === 'failed') {
+            await this._completeMission(mission, 'failed');
+            return;
+        }
+
+        // ─────────────────────────────────────────────
+        // Zamanlayıcı Stratejisi (Öncelik Sırası):
+        // ─────────────────────────────────────────────
         try {
-            // LLM'den JSON matrisi ile cevap üret
-            const { message, status, memberStatus } = await this.conversationEngine.generateReply(mission, combinedMessage);
-
-            // Gruptaki kişilerin durumunu güncelle ve logla
-            if (mission.isGroup && Object.keys(memberStatus || {}).length > 0) {
-                mission.memberStatus = { ...(mission.memberStatus || {}), ...memberStatus };
-                console.log(`👥 Grup Durum Matrisi (#${mission.id}):`, JSON.stringify(mission.memberStatus));
-            }
-
-            // Cevabı WhatsApp'tan gönder
-            await this.client.sendMessage(chatId, message);
-            console.log(`📤 Ajan cevabı (#${mission.id}): ${message}`);
-
-            // Görev durumunu kontrol et
-            if (status === 'completed') {
-                await this._completeMission(mission, 'completed');
-                return;
-            } else if (status === 'failed') {
-                await this._completeMission(mission, 'failed');
-                return;
-            }
-
-            // ─────────────────────────────────────────────
-            // Zamanlayıcı Stratejisi (Öncelik Sırası):
-            // ─────────────────────────────────────────────
             console.log(`🔍 Takip analizi yapılıyor (#${mission.id})...`);
             const followUp = await this.conversationEngine.analyzeForFollowUp(mission);
 
@@ -286,12 +321,22 @@ class MissionManager {
                     (tId, reason) => this._handleFollowUp(mission.id, reason)
                 );
             }
-
-            this._saveState();
-
-        } catch (error) {
-            console.error(`❌ Mesaj işleme hatası (#${mission.id}):`, error);
+        } catch (analyzeError) {
+            // Takip analizi başarısız olursa varsayılan 30dk takip kur
+            console.warn(`⚠️ Takip analizi hatası (#${mission.id}):`, analyzeError.message);
+            console.log(`⏳ Varsayılan takip bekleniyor (#${mission.id}): 30 dakika`);
+            const timerId = mission.id;
+            if (!mission.timers) mission.timers = {};
+            if (!mission.timers.individualFollowUps) mission.timers.individualFollowUps = {};
+            mission.timers.individualFollowUps[timerId] = this.scheduler.startFollowUpTimeout(
+                timerId,
+                30 * 60 * 1000,
+                'Takip analizi başarısız, varsayılan bekleme',
+                (tId, reason) => this._handleFollowUp(mission.id, reason)
+            );
         }
+
+        this._saveState();
     }
 
     /**
@@ -315,7 +360,28 @@ class MissionManager {
         }
 
         try {
-            const { message, status, memberStatus } = await this.conversationEngine.generateFollowUp(mission, reason);
+            // ─────────────────────────────────────────────
+            // LLM Çağrısı (Retry Mekanizmalı)
+            // ─────────────────────────────────────────────
+            let llmResult = null;
+            const maxRetries = 2;
+
+            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+                try {
+                    llmResult = await this.conversationEngine.generateFollowUp(mission, reason);
+                    break; // Başarılı, döngüden çık
+                } catch (error) {
+                    if (attempt < maxRetries) {
+                        const waitSec = (attempt + 1) * 5;
+                        console.warn(`⚠️ Ollama hatası (#${mission.id} - Takip), ${waitSec}s sonra tekrar denenecek (deneme ${attempt + 1}/${maxRetries})...`);
+                        await new Promise(r => setTimeout(r, waitSec * 1000));
+                    } else {
+                        throw error; // Tüm denemeler başarısızsa dış catch bloğuna fırlat
+                    }
+                }
+            }
+
+            const { message, status, memberStatus } = llmResult;
             
             if (mission.isGroup && Object.keys(memberStatus || {}).length > 0) {
                 mission.memberStatus = { ...(mission.memberStatus || {}), ...memberStatus };
@@ -335,7 +401,7 @@ class MissionManager {
                     timerId,
                     30 * 60 * 1000, // Varsayılan 30 dakika
                     'Takip mesajına henüz cevap gelmedi',
-                    (tId, reason) => this._handleFollowUp(mission.id, reason, target)
+                    (tId, r) => this._handleFollowUp(mission.id, r, target)
                 );
             }
 
@@ -347,7 +413,17 @@ class MissionManager {
                 await this._completeMission(mission, 'failed');
             }
         } catch (error) {
-            console.error(`❌ Takip mesajı hatası (#${mission.id}):`, error);
+            console.error(`❌ Takip mesajı hatası (#${mission.id}):`, error.message);
+            // Hata durumunda (Ollama çökmesi vb.) döngünün ölmemesi için 5 dakika sonra tekrar dene
+            const timerId = target && mission.isGroup ? `${mission.id}_${target}` : mission.id;
+            if (!mission.timers.individualFollowUps) mission.timers.individualFollowUps = {};
+            mission.timers.individualFollowUps[timerId] = this.scheduler.startFollowUpTimeout(
+                timerId,
+                5 * 60 * 1000, // 5 dakika sonra
+                reason || 'Ollama bağlantı hatası nedeniyle gecikmiş takip',
+                (tId, r) => this._handleFollowUp(mission.id, r, target)
+            );
+            this._saveState();
         }
     }
 

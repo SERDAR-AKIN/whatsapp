@@ -24,13 +24,13 @@ class ConversationEngine {
 - Sen ${CONFIG.owner.name}'ın (kısaca ${CONFIG.owner.shortName}) asistanısın.
 - ${CONFIG.owner.shortName} seni bu kişiyle iletişime geçmen için görevlendirdi.
 - Karşı tarafa kendini tanıtırken "${CONFIG.owner.shortName}'ın asistanıyım" veya "${CONFIG.owner.shortName} beni görevlendirdi" gibi ifadeler kullanabilirsin.
-- Konuşmada ${CONFIG.owner.shortName}'dan bahsederken HER ZAMAN ismini kullan, asla "o", "seni seven kişi" gibi belirsiz ifadeler kullanma.
+- Konuşmada ${CONFIG.owner.name}'dan bahsederken HER ZAMAN ismini kullan, asla "o", "seni seven kişi" gibi belirsiz ifadeler kullanma.
 
 ## Görevin:
 ${mission.taskDescription}
 
 ## İlk Mesaj Kuralları:
-1. İlk mesajda MUTLAKA kendini tanıt: Kim olduğunu ve ${CONFIG.owner.shortName} tarafından görevlendirildiğini belirt.
+1. İlk mesajda MUTLAKA kendini tanıt: Kim olduğunu ve ${CONFIG.owner.name} tarafından görevlendirildiğini belirt.
 2. Görevin ne olduğunu kısa ve net açıkla.
 3. Karşı tarafa ismiyle hitap et (görev açıklamasında isim varsa).
 
@@ -40,10 +40,18 @@ ${mission.taskDescription}
 3. Emoji kullanabilirsin ama abartma.
 4. Sadece görevle ilgili konuş, konu dışına çıkma. Eğer karşı taraf konu dışına çıkarsa nazikçe konuyu geri getir.
 5. Türkçe konuş.
-6. ${CONFIG.owner.shortName}'dan bahsederken her zaman ismini açıkça kullan. Örnek: "${CONFIG.owner.shortName}'ı ne kadar seviyorsun?" (DOĞRU) vs "Onu ne kadar seviyorsun?" (YANLIŞ).
+6. ${CONFIG.owner.shortName}'dan bahsederken her zaman ismini açıkça kullan. Örnek: "${CONFIG.owner.name}'ı ne kadar seviyorsun?" (DOĞRU) vs "Onu ne kadar seviyorsun?" (YANLIŞ).
+
+## Zaman Farkındalığı (ÇOK ÖNEMLİ):
+Her mesajın başında [SAAT: ...] etiketi ile şu anki saat bilgisi verilecek. Bu saati MUTLAKA dikkate al:
+- Karşı taraf belirli bir saat verdiyse (örn: "19:23'te yaparım"), o saat geçmişse bunu fark et ve "Saatin geçtiğini fark ettim, halledebildin mi?" gibi sor.
+- Karşı taraf "5 dakika sonra" dediyse ve aradan 20 dakika geçtiyse, bunu belirt.
+- Verilen süreleri mevcut saatle karşılaştırarak gerçekçi olup olmadığını değerlendir.
+- Asla geçmiş bir saati "tamam o saatte görüşürüz" diye kabul etme.
+- UYARI: Karşı tarafa yazacağın "reply" mesajının içinde ASLA [SAAT: ...] etiketini kullanma. Bu etiket sadece senin bilgilenmen içindir.
 
 ## Mantık Kontrolü (ÇOK ÖNEMLİ):
-Karşı tarafın verdiği cevapların MANTIKLI ve MAKUl olup olmadığını değerlendir. Eğer mantık dışı, kaçamak veya gerçekçi olmayan bir süre/cevap verirse, bunu nazik ama kararlı bir şekilde sorgula ve makul bir çözüme yönlendir.
+Karşı tarafın verdiği cevapların MANTIKLI ve MAKUL olup olmadığını değerlendir. Eğer mantık dışı, kaçamak veya gerçekçi olmayan bir süre/cevap verirse, bunu nazik ama kararlı bir şekilde sorgula ve makul bir çözüme yönlendir.
 
 Mantık dışı cevap örnekleri:
 - "Seneye yaparım/gönderirim" → Kabul etme! "Anlıyorum ama bu biraz uzun bir süre, daha yakın bir tarih mümkün mü?" gibi sor.
@@ -71,6 +79,8 @@ Bütün cevapların AŞAĞIDAKİ JSON FORMATINDA olmalıdır. Asla normal metin 
   "status": "active" veya "completed" veya "failed",
   "memberStatus": { "Kişi1": "Durumu", "Kişi2": "Durumu" }
 }
+
+- KRİTİK UYARI: "reply" metninin içerisinde ASLA ÇİFT TIRNAK (") KULLANMA. Vurgu yapmak veya alıntı yapmak için SADECE TEK TIRNAK (') KULLAN. Aksi takdirde JSON yapısı bozulur ve sistem çöker.
 
 ## Durum (status) Kuralları:
 - Görev hala devam ediyorsa "active" dön.
@@ -130,10 +140,15 @@ ${completionNote}`;
      * @returns {Promise<{message: string, status: string, memberStatus: Object}>}
      */
     async generateReply(mission, incomingMessage) {
+        // Mevcut saati mesajın başına ekle (zaman farkındalığı)
+        const now = new Date();
+        const currentTime = now.toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul', hour: '2-digit', minute: '2-digit', second: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' });
+        const timeTaggedMessage = `[SAAT: ${currentTime}] ${incomingMessage}`;
+
         // Gelen mesajı geçmişe ekle
         mission.conversationHistory.push({
             role: 'user',
-            content: incomingMessage,
+            content: timeTaggedMessage,
         });
 
         const response = await ollama.chat(mission.conversationHistory, true);
@@ -260,10 +275,14 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Mesajların başındaki [Ali], 
             ? ` Takip nedeni: ${followUpReason}.`
             : '';
 
+        // Mevcut saati hesapla (zaman farkındalığı)
+        const now = new Date();
+        const currentTime = now.toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul', hour: '2-digit', minute: '2-digit', second: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' });
+
         // Takip talimatını geçmişe ekle
         mission.conversationHistory.push({
             role: 'user',
-            content: `[SİSTEM NOTU: Karşı tarafın söylediği süre doldu.${reasonNote} Nazik bir şekilde durumu sor. Doğal ol, "süreniz doldu" gibi robotik konuşma. Sanki normal bir insan gibi "nasıl oldu, halledebildiniz mi?" tarzında sor. Önceki mesajlarını tekrarlama, farklı bir yaklaşım dene.]`,
+            content: `[SİSTEM NOTU — SAAT: ${currentTime}] Karşı tarafın söylediği süre doldu.${reasonNote} Şu anki saati dikkate alarak durumu değerlendir. Eğer karşı taraf daha önce belirli bir saat vermişse (ve o saat geçtiyse), bunu nazikçe hatırlat. Doğal ol, "süreniz doldu" gibi robotik konuşma. Sanki normal bir insan gibi "nasıl oldu, halledebildiniz mi?" tarzında sor. Önceki mesajlarını tekrarlama, farklı bir yaklaşım dene.`,
         });
 
         const response = await ollama.chat(mission.conversationHistory, true);
@@ -344,7 +363,16 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Mesajların başındaki [Ali], 
             const jsonMatch = response.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 const parsed = JSON.parse(jsonMatch[0]);
-                if (parsed.reply) cleanMessage = parsed.reply;
+                if (parsed.reply !== undefined) {
+                    cleanMessage = parsed.reply;
+                } else if (parsed.content !== undefined) {
+                    cleanMessage = parsed.content;
+                } else if (parsed.message !== undefined) {
+                    cleanMessage = parsed.message;
+                } else {
+                    // Eğer beklenen hiçbir anahtar yoksa ham JSON'u gönderme, temizlemeye çalış
+                    cleanMessage = response.replace(/[\{\}"]/g, '').trim();
+                }
                 if (parsed.status) status = parsed.status;
                 if (parsed.memberStatus) memberStatus = parsed.memberStatus;
             } else {
@@ -353,7 +381,24 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Mesajların başındaki [Ali], 
             }
         } catch (e) {
             console.error("⚠️ LLM JSON formatında cevap veremedi, ham metin ayrıştırılacak:", e.message);
-            cleanMessage = response.trim();
+            cleanMessage = response;
+            
+            // Eğer string "reply": ile başlıyorsa, içeriğini çıkarmaya çalış
+            const replyMatch = response.match(/"reply"\s*:\s*"([\s\S]*?)("(?=\s*,)|"(?=\s*\})|$)/);
+            if (replyMatch && replyMatch[1]) {
+                cleanMessage = replyMatch[1];
+            } else {
+                // Temel JSON yapılarını temizle
+                cleanMessage = response.replace(/[\{\}]/g, '')
+                                       .replace(/"reply"\s*:\s*/g, '')
+                                       .replace(/"status"\s*:\s*".*?"/g, '')
+                                       .replace(/"memberStatus"\s*:\s*.*/g, '')
+                                       .trim();
+                
+                // Başta ve sonda kalan serseri tırnakları temizle
+                if (cleanMessage.startsWith('"')) cleanMessage = cleanMessage.substring(1);
+                if (cleanMessage.endsWith('"')) cleanMessage = cleanMessage.slice(0, -1);
+            }
         }
 
         // Geriye dönük uyumluluk veya JSON dışı cevaplar için etiket kontrolü
@@ -364,6 +409,12 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Mesajların başındaki [Ali], 
             status = 'failed';
             cleanMessage = cleanMessage.replace(CONFIG.tags.failed, '').trim();
         }
+
+        // LLM yine de [SAAT: ...] etiketini cevaba eklediyse temizle
+        cleanMessage = cleanMessage.replace(/\[SAAT:\s*\d{2}:\d{2}\]/g, '').trim();
+
+        // Yaygın LLM hatalarını temizle (başta kalan "reply:", "asistan:" vb. etiketleri sil)
+        cleanMessage = cleanMessage.replace(/^(reply|asistan|cevap|message|content|bot|assistant)\s*:\s*/i, '').trim();
 
         return { cleanMessage, status, memberStatus };
     }

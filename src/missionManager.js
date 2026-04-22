@@ -1,0 +1,674 @@
+// ============================================
+// WhatsApp Otonom Ajan Sistemi — Görev Yöneticisi
+// ============================================
+
+const fs = require('fs');
+const path = require('path');
+const ConversationEngine = require('./conversationEngine');
+const Scheduler = require('./scheduler');
+const CONFIG = require('./config');
+
+class MissionManager {
+    constructor(whatsappClient) {
+        this.client = whatsappClient;
+        this.activeMissions = new Map(); // targetChatId → Mission
+        this.conversationEngine = new ConversationEngine();
+        this.scheduler = new Scheduler();
+        this.myNumber = null; // Botun kendi numarası (ready olunca set edilir)
+
+        // Log dizinini oluştur
+        if (CONFIG.logging.saveToFile) {
+            const logDir = path.resolve(CONFIG.logging.logDir);
+            if (!fs.existsSync(logDir)) {
+                fs.mkdirSync(logDir, { recursive: true });
+            }
+        }
+
+        // Kalıcı Hafıza (Persistence) dizinini oluştur
+        this.dataDir = path.resolve('./data');
+        this.stateFile = path.join(this.dataDir, 'active_missions.json');
+        this.tempStateFile = path.join(this.dataDir, 'active_missions.tmp');
+
+        if (!fs.existsSync(this.dataDir)) {
+            fs.mkdirSync(this.dataDir, { recursive: true });
+        }
+    }
+
+    /**
+     * Botun kendi numarasını ayarlar.
+     * @param {string} number
+     */
+    setMyNumber(number) {
+        this.myNumber = number;
+        console.log(`📱 Bot numarası: ${number}`);
+    }
+
+    /**
+     * Yeni bir görev başlatır.
+     * @param {Object} mission - parseCommand'den dönen görev objesi
+     * @returns {Promise<string>} - Kullanıcıya gösterilecek durum mesajı
+     */
+    async startMission(mission) {
+        // Aynı kişiye zaten aktif görev var mı kontrol et
+        if (this.activeMissions.has(mission.targetChatId)) {
+            const existing = this.activeMissions.get(mission.targetChatId);
+            return `⚠️ Bu numaraya zaten aktif bir görev var (ID: #${existing.id}). Önce !stop ${existing.id} ile durdurun.`;
+        }
+
+        try {
+            // Görevi aktif olarak kaydet ve timers objesini başlat
+            mission.status = 'active';
+            mission.timers = {};
+            mission.isGroup = mission.targetChatId.endsWith('@g.us');
+            this.activeMissions.set(mission.targetChatId, mission);
+
+            // LLM'den ilk mesajı üret
+            console.log(`🚀 Görev başlatılıyor: #${mission.id} → ${mission.targetNumber}`);
+            const firstMessage = await this.conversationEngine.generateFirstMessage(mission);
+
+            // WhatsApp'tan mesajı gönder
+            await this.client.sendMessage(mission.targetChatId, firstMessage);
+            console.log(`📤 İlk mesaj gönderildi: ${firstMessage}`);
+
+            // ─────────────────────────────────────────────
+            // Başlangıç Takip Zamanlayıcısı
+            // İlk mesajdan sonra karşı taraf cevap vermezse
+            // boşta kalmaması için bir takip kurulur
+            // ─────────────────────────────────────────────
+            if (mission.options.retryInterval) {
+                // Komutta periyodik süre belirtilmişse onu kullan
+                this.scheduler.startInterval(
+                    mission.id,
+                    mission.options.retryInterval,
+                    (mId) => this._handleFollowUp(mId)
+                );
+            } else {
+                // Belirtilmemişse: 5 dakika sonra ilk takip mesajı gönder
+                const initialFollowUpDelay = 5 * 60 * 1000; // 5 dakika
+                console.log(`⏰ Başlangıç takibi kuruldu (#${mission.id}): ${initialFollowUpDelay / 60000} dakika sonra`);
+                mission.timers.nextFollowUpAt = this.scheduler.startFollowUpTimeout(
+                    mission.id,
+                    initialFollowUpDelay,
+                    'İlk mesaja henüz cevap gelmedi',
+                    (mId, reason) => this._handleFollowUp(mId, reason)
+                );
+                mission.timers.followUpReason = 'İlk mesaja henüz cevap gelmedi';
+            }
+
+            // Zaman aşımı zamanlayıcısı
+            mission.timers.missionTimeoutAt = this.scheduler.startTimeout(
+                mission.id,
+                mission.options.timeout,
+                (mId) => this._handleTimeout(mId)
+            );
+
+            // Diske kaydet
+            this._saveState();
+
+            // Seçenekleri formatla
+            const retryInfo = mission.options.retryInterval
+                ? `\n🔁 Tekrar: ${mission.options.retryInterval / 60000} dakikada bir`
+                : '\n🔁 Takip: Cevap gelmezse 5 dk sonra hatırlatma';
+            const conditionInfo = mission.options.completionCondition
+                ? `\n✅ Tamamlanma: ${mission.options.completionCondition}`
+                : '';
+
+            return `✅ Görev oluşturuldu (ID: #${mission.id})
+📱 Hedef: ${mission.targetNumber}
+📋 Görev: ${mission.taskDescription.substring(0, 100)}...
+⏳ Durum: İlk mesaj gönderildi${retryInfo}${conditionInfo}`;
+
+        } catch (error) {
+            mission.status = 'failed';
+            this.activeMissions.delete(mission.targetChatId);
+            console.error(`❌ Görev başlatma hatası:`, error);
+            return `❌ Görev başlatılamadı: ${error.message}`;
+        }
+    }
+
+    /**
+     * Hedef kişiden gelen mesajı işler.
+     * @param {string} chatId - Mesajın geldiği chat ID (hem @c.us hem @lid olabilir)
+     * @param {string} messageBody - Mesaj içeriği
+     * @param {string} contactNumber - Gerçek telefon numarası (opsiyonel, @lid sorununu çözmek için)
+     * @returns {Promise<boolean>} - Mesaj bir göreve yönlendirildiyse true
+     */
+    async handleIncomingMessage(chatId, messageBody, contactNumber = null, senderName = null) {
+        let mission = this._findMissionByChatId(chatId);
+        
+        // Eğer chatId (örn: @lid) ile bulunamadıysa ve telefon numarası biliniyorsa onunla dene
+        if (!mission && contactNumber) {
+            mission = this._findMissionByChatId(`${contactNumber}@c.us`);
+        }
+
+        if (!mission) return false; // Bu kişiye aktif görev yok
+
+        // İlk kez farklı bir chatId formatıyla karşılaştıysak kaydet (@lid vs @c.us haritalama)
+        if (chatId !== mission.targetChatId && !mission.alternativeChatId) {
+            mission.alternativeChatId = chatId;
+            // Alternatif chatId ile de hızlı erişim sağla
+            this.activeMissions.set(chatId, mission);
+            console.log(`🔗 Alternatif chatId keşfedildi (#${mission.id}): ${chatId}`);
+        }
+
+        let formattedBody = messageBody;
+        if (mission.isGroup && senderName) {
+            formattedBody = `[${senderName}]: ${messageBody}`;
+        }
+
+        console.log(`📥 Hedef kişiden mesaj geldi (#${mission.id}): ${formattedBody}`);
+
+        // Maksimum mesaj kontrolü
+        if (mission.messageCount >= mission.options.maxMessages) {
+            await this._completeMission(mission, 'failed', 'Maksimum mesaj sayısına ulaşıldı.');
+            return;
+        }
+
+        // Mevcut periyodik zamanlayıcıyı temizle (cevap geldi, eski periyodik takip gereksiz)
+        this.scheduler.clearInterval(mission.id);
+        // Bireysel zamanlayıcıları KORUYARAK sadece genel (görev seviyesi) zamanlayıcıyı sil
+        // Grup modunda bireysel zamanlayıcıları silME - onlar kişiye özel
+        if (!mission.isGroup) {
+            this.scheduler.clearFollowUpTimeout(mission.id);
+        }
+
+        // Birebir veya Grup fark etmeksizin spam'ı önlemek için havuza ekle
+        if (!mission.messageQueue) mission.messageQueue = [];
+        mission.messageQueue.push(formattedBody);
+
+        if (!mission.timers.throttleTimeoutActive) {
+            const throttleMs = mission.isGroup ? 15000 : 5000;
+            const chatType = mission.isGroup ? "Grup" : "Birebir";
+            console.log(`⏳ ${chatType} mesajı havuza alındı (#${mission.id}). ${throttleMs/1000} saniye bekleniyor...`);
+            
+            mission.timers.throttleTimeoutActive = true;
+            const replyChatId = mission.targetChatId; // Closure güvenliği: sabit chatId yakala
+            this.scheduler.startThrottleTimeout(mission.id, throttleMs, async (mId) => {
+                mission.timers.throttleTimeoutActive = false;
+                await this._processReply(mId, replyChatId);
+            });
+        } else {
+            console.log(`⏳ Mesaj havuza eklendi (#${mission.id}). Toplam: ${mission.messageQueue.length}`);
+        }
+        return true;
+    }
+
+    /**
+     * Bekleyen mesaj havuzunu işleyip LLM'e iletir.
+     * @param {string} missionId
+     * @param {string} chatId
+     * @private
+     */
+    async _processReply(missionId, chatId) {
+        const mission = this._findMissionById(missionId);
+        if (!mission || mission.status !== 'active') return;
+
+        if (!mission.messageQueue || mission.messageQueue.length === 0) return;
+        const combinedMessage = mission.messageQueue.join('\n');
+        mission.messageQueue = []; // Kuyruğu temizle
+
+        try {
+            // LLM'den JSON matrisi ile cevap üret
+            const { message, status, memberStatus } = await this.conversationEngine.generateReply(mission, combinedMessage);
+
+            // Gruptaki kişilerin durumunu güncelle ve logla
+            if (mission.isGroup && Object.keys(memberStatus || {}).length > 0) {
+                mission.memberStatus = { ...(mission.memberStatus || {}), ...memberStatus };
+                console.log(`👥 Grup Durum Matrisi (#${mission.id}):`, JSON.stringify(mission.memberStatus));
+            }
+
+            // Cevabı WhatsApp'tan gönder
+            await this.client.sendMessage(chatId, message);
+            console.log(`📤 Ajan cevabı (#${mission.id}): ${message}`);
+
+            // Görev durumunu kontrol et
+            if (status === 'completed') {
+                await this._completeMission(mission, 'completed');
+                return;
+            } else if (status === 'failed') {
+                await this._completeMission(mission, 'failed');
+                return;
+            }
+
+            // ─────────────────────────────────────────────
+            // Zamanlayıcı Stratejisi (Öncelik Sırası):
+            // ─────────────────────────────────────────────
+            console.log(`🔍 Takip analizi yapılıyor (#${mission.id})...`);
+            const followUp = await this.conversationEngine.analyzeForFollowUp(mission);
+
+            if (followUp.needsFollowUp && followUp.followUps && followUp.followUps.length > 0) {
+                // ✅ Akıllı takip öncelikli
+                if (!mission.timers.individualFollowUps) mission.timers.individualFollowUps = {};
+
+                for (let fu of followUp.followUps) {
+                    const delayMinutes = Math.round(fu.delayMs / 60000);
+                    const targetInfo = mission.isGroup ? ` [${fu.target}]` : '';
+                    console.log(`⏰ Akıllı takip planlandı (#${mission.id}${targetInfo}): ${delayMinutes} dakika sonra — ${fu.reason}`);
+
+                    const myChatId = `${this.myNumber}@c.us`;
+
+                    if (fu.isUnreasonable) {
+                        await this.client.sendMessage(myChatId,
+                            `⚠️ #${mission.id} → ${mission.targetNumber}${targetInfo}\n` +
+                            `🚩 Mantık dışı cevap algılandı: ${fu.reason}\n` +
+                            `🤖 Ajan nazikçe itiraz etti ve makul bir süreye yönlendirdi.\n` +
+                            `🔁 ${delayMinutes} dakika sonra takip yapılacak.`
+                        );
+                    }
+
+                    const timerId = mission.isGroup ? `${mission.id}_${fu.target}` : mission.id;
+                    
+                    mission.timers.individualFollowUps[timerId] = this.scheduler.startFollowUpTimeout(
+                        timerId,
+                        fu.delayMs,
+                        fu.reason,
+                        (tId, reason) => this._handleFollowUp(mission.id, reason, fu.target)
+                    );
+                }
+            } else if (mission.options.retryInterval) {
+                // ⏰ Akıllı takip gerekmedi → periyodik
+                console.log(`⏰ Periyodik takip yeniden başlatıldı (#${mission.id}): ${mission.options.retryInterval / 60000} dk`);
+                this.scheduler.startInterval(
+                    mission.id,
+                    mission.options.retryInterval,
+                    (mId) => this._handleFollowUp(mId)
+                );
+                this.scheduler.clearFollowUpTimeout(mission.id);
+            } else {
+                // ⏳ Hiçbir zamanlayıcı yok → varsayılan geri düşüş
+                console.log(`⏳ Varsayılan takip bekleniyor (#${mission.id}): 30 dakika`);
+                const timerId = mission.id;
+                if (!mission.timers.individualFollowUps) mission.timers.individualFollowUps = {};
+                mission.timers.individualFollowUps[timerId] = this.scheduler.startFollowUpTimeout(
+                    timerId,
+                    30 * 60 * 1000,
+                    'Karşı taraftan uzun süredir cevap gelmedi',
+                    (tId, reason) => this._handleFollowUp(mission.id, reason)
+                );
+            }
+
+            this._saveState();
+
+        } catch (error) {
+            console.error(`❌ Mesaj işleme hatası (#${mission.id}):`, error);
+        }
+    }
+
+    /**
+     * Periyodik veya akıllı takip mesajı gönderir.
+     * @param {string} missionId
+     * @param {string} [reason] - Takibin nedeni (akıllı takip analizi sonucu)
+     * @param {string} [target] - Grup içindeki kişi (opsiyonel)
+     * @private
+     */
+    async _handleFollowUp(missionId, reason, target = null) {
+        const mission = this._findMissionById(missionId);
+        if (!mission || mission.status !== 'active') {
+            this.scheduler.clearAll(missionId);
+            return;
+        }
+
+        // Maksimum tekrar kontrolü
+        if (mission.retryCount >= mission.options.maxRetries) {
+            await this._completeMission(mission, 'failed', 'Maksimum takip sayısına ulaşıldı, cevap alınamadı.');
+            return;
+        }
+
+        try {
+            const { message, status, memberStatus } = await this.conversationEngine.generateFollowUp(mission, reason);
+            
+            if (mission.isGroup && Object.keys(memberStatus || {}).length > 0) {
+                mission.memberStatus = { ...(mission.memberStatus || {}), ...memberStatus };
+                console.log(`👥 Grup Durum Matrisi (#${mission.id}):`, JSON.stringify(mission.memberStatus));
+            }
+
+            await this.client.sendMessage(mission.targetChatId, message);
+            console.log(`📤 Takip mesajı (#${mission.id}, deneme ${mission.retryCount}): ${message}`);
+
+            const timerId = target && mission.isGroup ? `${mission.id}_${target}` : mission.id;
+            this.scheduler.clearFollowUpTimeout(timerId);
+
+            // Eğer periyodik (interval) döngüsü yoksa bir sonraki varsayılan bekleme süresini (30 dk) kur
+            if (!mission.options.retryInterval) {
+                if (!mission.timers.individualFollowUps) mission.timers.individualFollowUps = {};
+                mission.timers.individualFollowUps[timerId] = this.scheduler.startFollowUpTimeout(
+                    timerId,
+                    30 * 60 * 1000, // Varsayılan 30 dakika
+                    'Takip mesajına henüz cevap gelmedi',
+                    (tId, reason) => this._handleFollowUp(mission.id, reason, target)
+                );
+            }
+
+            this._saveState();
+
+            if (status === 'completed') {
+                await this._completeMission(mission, 'completed');
+            } else if (status === 'failed') {
+                await this._completeMission(mission, 'failed');
+            }
+        } catch (error) {
+            console.error(`❌ Takip mesajı hatası (#${mission.id}):`, error);
+        }
+    }
+
+    /**
+     * Zaman aşımı durumunu işler.
+     * @param {string} missionId
+     * @private
+     */
+    async _handleTimeout(missionId) {
+        const mission = this._findMissionById(missionId);
+        if (!mission || mission.status !== 'active') return;
+
+        await this._completeMission(mission, 'failed', 'Görev zaman aşımına uğradı.');
+    }
+
+    /**
+     * Görevi tamamlar, zamanlayıcıları temizler, rapor gönderir.
+     * @param {Object} mission
+     * @param {string} status - 'completed' | 'failed'
+     * @param {string} [reason] - Başarısızlık nedeni
+     * @private
+     */
+    async _completeMission(mission, status, reason) {
+        mission.status = status;
+        mission.completedAt = new Date().toISOString();
+
+        // Zamanlayıcıları temizle
+        this.scheduler.clearAll(mission.id);
+
+        // Aktif görevlerden kaldır
+        this.activeMissions.delete(mission.targetChatId);
+        if (mission.alternativeChatId) {
+            this.activeMissions.delete(mission.alternativeChatId);
+        }
+
+        console.log(`${status === 'completed' ? '✅' : '❌'} Görev sonlandı: #${mission.id} — ${status}`);
+        if (reason) console.log(`   Neden: ${reason}`);
+
+        // Kullanıcıya rapor gönder
+        try {
+            let report = await this.conversationEngine.generateReport(mission);
+            if (reason) report += `\n📌 Not: ${reason}`;
+
+            const myChatId = `${this.myNumber}@c.us`;
+            await this.client.sendMessage(myChatId, report);
+        } catch (error) {
+            console.error('❌ Rapor gönderilemedi:', error);
+        }
+
+        // Log dosyasına kaydet
+        this._saveLog(mission);
+        this._saveState();
+    }
+
+    /**
+     * Aktif bir görevi durdurur.
+     * @param {string} missionId - Görev ID veya 'all'
+     * @returns {string} - Durum mesajı
+     */
+    stopMission(missionId) {
+        if (missionId === 'all') {
+            const count = this.activeMissions.size;
+            for (const [, mission] of this.activeMissions) {
+                mission.status = 'stopped';
+                mission.completedAt = new Date().toISOString();
+                this._saveLog(mission);
+            }
+            this.activeMissions.clear();
+            this.scheduler.clearEverything();
+            this._saveState();
+            return `🛑 Tüm görevler durduruldu (${count} görev).`;
+        }
+
+        const mission = this._findMissionById(missionId);
+        if (!mission) {
+            return `⚠️ Görev bulunamadı: ${missionId}`;
+        }
+
+        mission.status = 'stopped';
+        mission.completedAt = new Date().toISOString();
+        this.scheduler.clearAll(mission.id);
+        this.activeMissions.delete(mission.targetChatId);
+        if (mission.alternativeChatId) {
+            this.activeMissions.delete(mission.alternativeChatId);
+        }
+        this._saveLog(mission);
+        this._saveState();
+        return `🛑 Görev durduruldu: #${mission.id}`;
+    }
+
+    /**
+     * Aktif görevlerin listesini döndürür.
+     * @returns {string}
+     */
+    getStatusReport() {
+        if (this.activeMissions.size === 0) {
+            return '📋 Aktif görev bulunmuyor.';
+        }
+
+        let report = `📋 Aktif Görevler (${this.activeMissions.size}):\n`;
+        for (const [, mission] of this.activeMissions) {
+            const elapsed = this._getElapsedTime(mission.createdAt);
+            report += `\n🔹 #${mission.id} → ${mission.targetNumber}`;
+            report += `\n   📋 ${mission.taskDescription.substring(0, 60)}...`;
+            report += `\n   💬 ${mission.messageCount} mesaj | ⏱️ ${elapsed}\n`;
+        }
+
+        return report;
+    }
+
+    /**
+     * Görev ID'sine göre görev bulur.
+     * @param {string} missionId
+     * @returns {Object|undefined}
+     * @private
+     */
+    _findMissionById(missionId) {
+        for (const [, mission] of this.activeMissions) {
+            if (mission.id === missionId) return mission;
+        }
+        return undefined;
+    }
+
+    /**
+     * Chat ID veya Telefon Numarası ile görevi bulur (lid vs c.us toleransı).
+     * @param {string} chatId - Gelen mesajın chatId'si
+     * @returns {Object|undefined}
+     * @private
+     */
+    _findMissionByChatId(chatId) {
+        // Tam eşleşme kontrolü (activeMissions map'inden)
+        if (this.activeMissions.has(chatId)) {
+            return this.activeMissions.get(chatId);
+        }
+
+        // Toleranslı arama: Sadece numara kısmını ayıkla
+        // Örn: "90507...17@c.us" -> "90507...17"
+        // Örn: "9707...77@lid" -> "9707...77" (Eğer numaralar uyuşuyorsa diye, 
+        // ama LID genellikle farklıdır. Bu yüzden asıl çözüm numarayı targetNumber ile eşleştirmek)
+        
+        // Eğer chatId içinde @lid veya @c.us varsa, bu bir gruptan veya özelden gelmiş olabilir
+        // Numara tabanlı eşleşme için hedef numarayı kontrol et
+        const incomingNumber = chatId.split('@')[0];
+
+        for (const [, mission] of this.activeMissions) {
+            // Hedef numara, gelen chatId'nin içinde geçiyorsa (veya tam tersi) eşleşme kabul et
+            // Bu, bazı LID formatlarında numaranın görünmediği durumları kapsamayabilir.
+            // WhatsApp Web JS'de genellikle Message.author veya Message.from kullanılır.
+            if (chatId === mission.targetChatId || chatId === mission.alternativeChatId) {
+                return mission;
+            }
+            // Çok zorlayıcı tolerans: Gelen numara targetNumber ile aynı mı?
+            if (incomingNumber === mission.targetNumber) {
+                return mission;
+            }
+            // @lid durumlarında, eğer bu kişiden gelen İLK mesajsa, main.js'de
+            // `message.from` numarası üzerinden bir eşleştirme de yapılabilirdi, ama 
+            // `handleIncomingMessage` doğrudan `message.from` alıyor.
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Geçen süreyi okunabilir formatta döndürür.
+     * @private
+     */
+    _getElapsedTime(startISO) {
+        const diffMs = Date.now() - new Date(startISO).getTime();
+        const mins = Math.floor(diffMs / 60000);
+        if (mins < 1) return 'az önce';
+        if (mins < 60) return `${mins} dk`;
+        return `${Math.floor(mins / 60)} sa ${mins % 60} dk`;
+    }
+
+    /**
+     * Görev logunu dosyaya kaydeder.
+     * @param {Object} mission
+     * @private
+     */
+    _saveLog(mission) {
+        if (!CONFIG.logging.saveToFile) return;
+
+        try {
+            const logDir = path.resolve(CONFIG.logging.logDir);
+            const filename = `mission_${mission.id}_${mission.status}.json`;
+            const filepath = path.join(logDir, filename);
+
+            const logData = {
+                id: mission.id,
+                targetNumber: mission.targetNumber,
+                taskDescription: mission.taskDescription,
+                status: mission.status,
+                createdAt: mission.createdAt,
+                completedAt: mission.completedAt,
+                messageCount: mission.messageCount,
+                retryCount: mission.retryCount,
+                options: mission.options,
+                conversation: mission.conversationHistory
+                    .filter(m => m.role !== 'system')
+                    .map(m => ({
+                        role: m.role,
+                        content: m.content,
+                    })),
+            };
+
+            fs.writeFileSync(filepath, JSON.stringify(logData, null, 2), 'utf-8');
+            console.log(`💾 Görev logu kaydedildi: ${filepath}`);
+        } catch (error) {
+            console.error('⚠️ Log kaydetme hatası:', error.message);
+        }
+    }
+
+    /**
+     * Aktif görevlerin anlık durumunu diske kaydeder (Atomik yazma).
+     * @private
+     */
+    _saveState() {
+        try {
+            const missionsArray = Array.from(this.activeMissions.values());
+            // Map'te ayni mission iki kere (targetChatId ve alternativeChatId ile) olabilir.
+            // Benzersiz mission'ları filtreleyelim.
+            const uniqueMissions = [];
+            const seenIds = new Set();
+            for (const m of missionsArray) {
+                if (!seenIds.has(m.id)) {
+                    seenIds.add(m.id);
+                    uniqueMissions.push(m);
+                }
+            }
+
+            fs.writeFileSync(this.tempStateFile, JSON.stringify(uniqueMissions, null, 2), 'utf-8');
+            fs.renameSync(this.tempStateFile, this.stateFile); // Atomik
+        } catch (error) {
+            console.error('⚠️ Kalıcı hafıza kayıt hatası:', error.message);
+        }
+    }
+
+    /**
+     * Başlangıçta aktif görevleri diskten belleğe geri yükler.
+     */
+    restoreMissions() {
+        if (!fs.existsSync(this.stateFile)) return;
+
+        try {
+            const data = fs.readFileSync(this.stateFile, 'utf-8');
+            const missions = JSON.parse(data);
+
+            const now = Date.now();
+            let restoredCount = 0;
+
+            for (const mission of missions) {
+                // Belleğe yükle
+                this.activeMissions.set(mission.targetChatId, mission);
+                if (mission.alternativeChatId) {
+                    this.activeMissions.set(mission.alternativeChatId, mission);
+                }
+
+                // Zamanlayıcıları kontrol et (Time Travel)
+                const timers = mission.timers || {};
+
+                // 1. Görev zaman aşımı (Timeout) kontrolü
+                if (timers.missionTimeoutAt) {
+                    const timeoutDelay = timers.missionTimeoutAt - now;
+                    if (timeoutDelay <= 0) {
+                        // Çoktan zaman aşımına uğramış
+                        this._handleTimeout(mission.id);
+                        continue; // Görev kapandığı için takip kurmaya gerek yok
+                    } else {
+                        timers.missionTimeoutAt = this.scheduler.startTimeout(
+                            mission.id,
+                            0, // absolute kullanıldığında bu göz ardı edilir
+                            (mId) => this._handleTimeout(mId),
+                            timers.missionTimeoutAt
+                        );
+                    }
+                }
+
+                // 2. Bireysel takip zamanlayıcıları (Faz 3 uyumlu)
+                if (timers.individualFollowUps && Object.keys(timers.individualFollowUps).length > 0) {
+                    for (const [timerId, targetTime] of Object.entries(timers.individualFollowUps)) {
+                        if (typeof targetTime !== 'number') continue;
+                        
+                        // timerId formatı: "missionId_KişiAdı" veya "missionId"
+                        const parts = timerId.split('_');
+                        const target = parts.length > 1 ? parts.slice(1).join('_') : null;
+                        
+                        timers.individualFollowUps[timerId] = this.scheduler.startFollowUpTimeout(
+                            timerId,
+                            0,
+                            'Bot yeniden başlatıldı, geciken takip.',
+                            (tId, reason) => this._handleFollowUp(mission.id, reason, target),
+                            targetTime
+                        );
+                    }
+                } else if (timers.nextFollowUpAt) {
+                    // Geriye dönük uyumluluk: eski format
+                    timers.nextFollowUpAt = this.scheduler.startFollowUpTimeout(
+                        mission.id,
+                        0,
+                        timers.followUpReason || 'Bot yeniden başlatıldı, geciken takip.',
+                        (mId, reason) => this._handleFollowUp(mId, reason),
+                        timers.nextFollowUpAt
+                    );
+                } else if (mission.options.retryInterval) {
+                    // Periyodik takip varsa ve akıllı takip yoksa, sıfırdan periyodik başlat
+                    this.scheduler.startInterval(
+                        mission.id,
+                        mission.options.retryInterval,
+                        (mId) => this._handleFollowUp(mId)
+                    );
+                }
+
+                restoredCount++;
+            }
+
+            console.log(`💾 Kalıcı hafızadan ${restoredCount} görev başarıyla geri yüklendi.`);
+        } catch (error) {
+            console.error('❌ Kalıcı hafıza geri yükleme hatası:', error.message);
+        }
+    }
+}
+
+module.exports = MissionManager;

@@ -1,57 +1,222 @@
+// ============================================
+// WhatsApp Otonom Ajan Sistemi — Ana Giriş Noktası
+// ============================================
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+const MissionManager = require('./src/missionManager');
+const OllamaClient = require('./src/ollamaClient');
+const { parseCommand, parseStopCommand, parseUtilityCommand } = require('./src/commandParser');
 
-// Create a new client instance with LocalAuth for session persistence
-// and no-sandbox flags for headless Linux environment
+// WhatsApp Client oluştur
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    }
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu',
+        ],
+    },
 });
 
-// When the client received QR-Code, display it in terminal
+// Görev Yöneticisi
+const missionManager = new MissionManager(client);
+
+// Ollama bağlantı kontrolü
+const ollama = new OllamaClient();
+
+// ============================================
+// WhatsApp Olayları
+// ============================================
+
 client.on('qr', (qr) => {
-    console.log('QR Code received! Scan it with your phone:');
+    console.log('📲 QR Code taratın:');
     qrcode.generate(qr, { small: true });
 });
 
-// When the client is ready, run this code (only once)
-client.once('ready', () => {
-    console.log('✅ Client is ready!');
+client.on('loading_screen', (percent, message) => {
+    console.log(`⏳ Yükleniyor: %${percent} — ${message}`);
 });
 
-// When authenticated
+client.once('ready', async () => {
+    const myNumber = client.info.wid.user;
+    missionManager.setMyNumber(myNumber);
+
+    // Ollama sunucu kontrolü
+    const ollamaOk = await ollama.healthCheck();
+    console.log(ollamaOk
+        ? '🧠 Ollama sunucusu bağlı ve hazır.'
+        : '⚠️ Ollama sunucusuna ulaşılamıyor! Görevler başlatılamayacak.'
+    );
+
+    // Kalıcı hafızayı geri yükle
+    missionManager.restoreMissions();
+
+    console.log('');
+    console.log('═══════════════════════════════════════════');
+    console.log('  ✅ WhatsApp Otonom Ajan Sistemi Hazır!');
+    console.log('═══════════════════════════════════════════');
+    console.log(`  📱 Hesap : ${myNumber}`);
+    console.log(`  🧠 Model : gemma4:26b`);
+    console.log(`  🌐 Ollama: ${ollamaOk ? 'Bağlı ✅' : 'Bağlantı Yok ❌'}`);
+    console.log('');
+    console.log('  Komutlar:');
+    console.log('  !ai <numara> <görev>  → Yeni görev başlat');
+    console.log('  !stop [id]            → Görevi durdur');
+    console.log('  !durum                → Aktif görevleri listele');
+    console.log('  !liste                → Aktif görevleri listele');
+    console.log('  !ping                 → Bağlantı testi');
+    console.log('═══════════════════════════════════════════');
+    console.log('');
+});
+
 client.on('authenticated', () => {
-    console.log('🔐 Authenticated successfully!');
+    console.log('🔐 Kimlik doğrulama başarılı, senkronize ediliyor...');
 });
 
-// Authentication failure
 client.on('auth_failure', (msg) => {
-    console.error('❌ Authentication failed:', msg);
+    console.error('❌ Kimlik doğrulama hatası:', msg);
 });
 
-// Disconnected
 client.on('disconnected', (reason) => {
-    console.log('🔌 Client was disconnected:', reason);
+    console.log('🔌 Bağlantı kesildi:', reason);
 });
 
-// Ping/Pong bot - listens for "!ping" and replies with "pong"
-client.on('message_create', async (message) => {
-    const chat = await message.getChat();
-    
-    // Log message details to terminal to see group/chat IDs
-    console.log(`\n--- NEW MESSAGE ---`);
-    console.log(`From: ${chat.name} (${message.from})`);
-    console.log(`Body: ${message.body}`);
-    console.log(`-------------------\n`);
+// ============================================
+// Mesaj İşleme (Ana Router)
+// ============================================
 
-    if (message.body === '!ping') {
-        message.reply('pong');
-        console.log('🏓 Replied "pong" to', message.from);
+/**
+ * Gelen mesajı aktif görevlere yönlendirir.
+ * @param {Object} message - WhatsApp Web JS mesaj objesi
+ * @param {string} overrideChatId - (Opsiyonel) Zorunlu chatId (self-test için)
+ */
+async function routeToMission(message, overrideChatId = null) {
+    const senderChatId = overrideChatId || message.from;
+    const body = message.body;
+
+    let contactNumber = null;
+    let senderName = null;
+    try {
+        const contact = await message.getContact();
+        if (contact) {
+            if (contact.number) contactNumber = contact.number;
+            senderName = contact.pushname || contact.name || contact.shortName || contact.number;
+        }
+    } catch (e) {
+        // Hata olursa null kalır
+    }
+
+    const handled = await missionManager.handleIncomingMessage(senderChatId, body, contactNumber, senderName);
+    if (handled) {
+        console.log(`📥 [GÖREV YÖNLENDİRİLDİ] (${senderChatId}): ${body}`);
+        return true;
+    }
+    return false;
+}
+
+// ─────────────────────────────────────────────
+// message_create: Tüm mesajlar (giden + gelen)
+// Kullanıcının kendi !ai komutlarını yakalar
+// ─────────────────────────────────────────────
+client.on('message_create', async (message) => {
+    const myChatId = `${missionManager.myNumber}@c.us`;
+    const fromMe = message.fromMe;
+    const chatId = message.from;
+    const body = message.body;
+
+    // Bot hazır değilse veya boş mesajsa atla
+    if (!missionManager.myNumber || !body || body.trim() === '') return;
+
+    // ─────────────────────────────────────
+    // 1. Kendi kendime mesaj (Komut Modu)
+    // ─────────────────────────────────────
+    if (fromMe && chatId === myChatId) {
+
+        // --- !ai komutu: Yeni görev başlat ---
+        if (body.startsWith('!ai ')) {
+            console.log(`\n🎯 Yeni görev komutu alındı: ${body}`);
+
+            const mission = await parseCommand(body, client);
+
+            if (!mission) return;
+            if (mission.error) {
+                await client.sendMessage(myChatId, mission.error);
+                return;
+            }
+
+            const statusMsg = await missionManager.startMission(mission);
+            await client.sendMessage(myChatId, statusMsg);
+            return;
+        }
+
+        // --- !stop komutu: Görevi durdur ---
+        const stopId = parseStopCommand(body);
+        if (stopId !== null) {
+            const result = missionManager.stopMission(stopId);
+            await client.sendMessage(myChatId, result);
+            return;
+        }
+
+        // --- Yardımcı komutlar ---
+        const utilCmd = parseUtilityCommand(body);
+        if (utilCmd === 'status' || utilCmd === 'list') {
+            const report = missionManager.getStatusReport();
+            await client.sendMessage(myChatId, report);
+            return;
+        }
+
+        // --- !ping komutu: Bağlantı testi ---
+        if (body.trim().toLowerCase() === '!ping') {
+            await message.reply('pong 🏓');
+            return;
+        }
+
+        // ─────────────────────────────────────
+        // Komut değilse: Belki kendi numaramıza
+        // yönelik aktif bir görev vardır (self-test)
+        // ─────────────────────────────────────
+        const routed = await routeToMission(message, myChatId);
+        if (routed) return;
+
+        return; // Diğer kendi mesajlarımı işleme
     }
 });
 
-// Start the client
-console.log('🚀 Starting WhatsApp bot...');
+// ─────────────────────────────────────────────
+// message: Sadece gelen mesajlar (dışarıdan)
+// Hedef kişiden gelen cevapları yakalar
+// ─────────────────────────────────────────────
+client.on('message', async (message) => {
+    // Bot hazır değilse veya boş mesajsa atla
+    if (!missionManager.myNumber || !message.body || message.body.trim() === '') return;
+
+    const senderChatId = message.from;
+    const body = message.body;
+
+    // Konsol logu
+    try {
+        const chat = await message.getChat();
+        console.log(`\n📨 Gelen mesaj: ${chat.name} (${senderChatId}): ${body}`);
+    } catch {
+        console.log(`\n📨 Gelen mesaj: (${senderChatId}): ${body}`);
+    }
+
+    // Görev yöneticisine yönlendir
+    await routeToMission(message);
+});
+
+// ============================================
+// Başlat
+// ============================================
+console.log('');
+console.log('🚀 WhatsApp Otonom Ajan Sistemi başlatılıyor...');
+console.log('');
 client.initialize();

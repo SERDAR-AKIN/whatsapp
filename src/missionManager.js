@@ -130,10 +130,22 @@ class MissionManager {
     }
 
     /**
-     * Hedef kişiden gelen mesajı işler.
+     * @description WhatsApp'tan gelen mesajları doğrudan LLM'e göndermek yerine bir havuza (queue) ekler.
+     * **Message Pooling (Mesaj Havuzu) Mantığı:** 
+     * Kullanıcıların peş peşe gönderdiği mesajlar 15 saniyelik bir `throttleTimeout` ile biriktirilir.
+     * Bu süre dolduğunda tüm havuz tek bir metin olarak birleştirilip LLM'e gönderilir (`_processReply`).
+     * 
+     * **Yarış Koşulu (Race Condition) Önlemi:** `throttleTimeoutActive` bayrağı sayesinde aynı anda birden
+     * fazla LLM isteği (overlap) fırlatılması kesin olarak engellenir.
+     * 
+     * @example
+     * // Kullanıcı 3 saniye arayla "Tamam", "Yarın", "Görüşürüz" yazdı.
+     * // handleIncomingMessage 3 kez çağrılır ama LLM'e tek bir "Tamam\nYarın\nGörüşürüz" mesajı gider.
+     * 
      * @param {string} chatId - Mesajın geldiği chat ID (hem @c.us hem @lid olabilir)
      * @param {string} messageBody - Mesaj içeriği
      * @param {string} contactNumber - Gerçek telefon numarası (opsiyonel, @lid sorununu çözmek için)
+     * @param {string} senderName - Grup içi mesajlarda konuşan kişinin ismi
      * @returns {Promise<boolean>} - Mesaj bir göreve yönlendirildiyse true
      */
     async handleIncomingMessage(chatId, messageBody, contactNumber = null, senderName = null) {
@@ -180,7 +192,7 @@ class MissionManager {
         mission.messageQueue.push(formattedBody);
 
         if (!mission.timers.throttleTimeoutActive) {
-            const throttleMs = mission.isGroup ? 15000 : 5000;
+            const throttleMs = 15000;
             const chatType = mission.isGroup ? "Grup" : "Birebir";
             console.log(`⏳ ${chatType} mesajı havuza alındı (#${mission.id}). ${throttleMs/1000} saniye bekleniyor...`);
             
@@ -191,7 +203,7 @@ class MissionManager {
                 await this._processReply(mId, replyChatId);
 
                 // İşlem sırasında yeni mesaj geldiyse, kısa bekleyip tekrar işle
-                const drainMs = mission.isGroup ? 15000 : 5000;
+                const drainMs = 15000;
                 while (mission.messageQueue && mission.messageQueue.length > 0 && mission.status === 'active') {
                     console.log(`⏳ İşlem sırasında ${mission.messageQueue.length} yeni mesaj birikti (#${mission.id}). ${drainMs/1000}s beklenip işlenecek...`);
                     await new Promise(r => setTimeout(r, drainMs));
@@ -207,10 +219,14 @@ class MissionManager {
     }
 
     /**
-     * Bekleyen mesaj havuzunu işleyip LLM'e iletir.
-     * @param {string} missionId
-     * @param {string} chatId
+     * @description Bekleyen mesaj havuzunu (messageQueue) birleştirerek `conversationEngine` üzerinden LLM'e iletir.
+     * **Hata Kurtarma (Retry):** Eğer LLM (Gemini/Ollama) yanıt vermezse, `maxRetries` (2) kadar tekrar dener.
+     * Eğer tüm denemeler başarısız olursa, havuzdaki mesajları kaybetmemek için kuyruğun en başına (unshift) geri koyar.
+     * 
      * @private
+     * @param {string} missionId - İşlenecek görevin benzersiz ID'si.
+     * @param {string} chatId - WhatsApp sohbet (chat) ID'si.
+     * @returns {Promise<void>}
      */
     async _processReply(missionId, chatId) {
         const mission = this._findMissionById(missionId);
@@ -651,7 +667,10 @@ class MissionManager {
     }
 
     /**
-     * Aktif görevlerin anlık durumunu diske kaydeder (Atomik yazma).
+     * @description Uygulama kapatıldığında (veya her önemli durum değişikliğinde) bellekteki tüm aktif görevleri
+     * JSON formatında `data/active_missions.json` dosyasına senkronize eder.
+     * Bu işlem "Resilience" (Dayanıklılık) sağlar; sunucu çökerse bile görevler, zamanlayıcılar ve geçmiş korunur.
+     * 
      * @private
      */
     _saveState() {
@@ -676,7 +695,13 @@ class MissionManager {
     }
 
     /**
-     * Başlangıçta aktif görevleri diskten belleğe geri yükler.
+     * @description Sunucu ilk başlatıldığında `active_missions.json` dosyasını okuyarak belleği (RAM) yeniden inşa eder (Hydration).
+     * **Süre Kontrolü:** Eğer kayıtlı görevlerin zamanlayıcı (followUp) vakti geçmişse veya yaklaşmışsa, 
+     * `scheduler` üzerinden ilgili zamanlayıcıları (setTimeout) yeniden kurar.
+     * 
+     * @example
+     * const manager = new MissionManager(client);
+     * manager.restoreMissions(); // Uygulama ayağa kalkarken çağrılır.
      */
     restoreMissions() {
         if (!fs.existsSync(this.stateFile)) return;

@@ -15,10 +15,13 @@ class Scheduler {
     }
 
     /**
-     * Periyodik takip zamanlayıcısı başlatır.
-     * @param {string} missionId - Görev ID
-     * @param {number} intervalMs - Tekrar aralığı (ms)
-     * @param {Function} callback - Her tetiklemede çağrılacak fonksiyon
+     * @description Belirli bir görev için periyodik (tekrarlı) takip zamanlayıcısı başlatır.
+     * Kullanıcı `!ai görev` başlatırken `--retryInterval` belirtmişse bu metot kullanılır.
+     * Eğer önceden var olan bir interval varsa, önce onu temizler (Memory leak önlemi).
+     * 
+     * @param {string} missionId - Hedef görevin benzersiz ID'si.
+     * @param {number} intervalMs - İki tekrar arasındaki bekleme süresi (Milisaniye cinsinden).
+     * @param {Function} callback - Süre dolduğunda tetiklenecek fonksiyon.
      */
     startInterval(missionId, intervalMs, callback) {
         // Var olan interval varsa temizle
@@ -35,12 +38,16 @@ class Scheduler {
     }
 
     /**
-     * Görev zaman aşımı zamanlayıcısı başlatır.
-     * @param {string} missionId - Görev ID
-     * @param {number} timeoutMs - Zaman aşımı süresi (ms)
-     * @param {Function} callback - Zaman aşımında çağrılacak fonksiyon
-     * @param {number} [absoluteTimestamp] - (Opsiyonel) Geri yükleme işlemi için tam tetiklenme zamanı
-     * @returns {number} Tetikleneceği tam zaman (timestamp)
+     * @description Bir görevin maksimum yaşayabileceği (time-to-live) süreyi belirleyen zaman aşımı sayacını başlatır.
+     * Görev çok uzun süre havada kalırsa, bu zamanlayıcı devreye girip görevi zorla `failed` durumuna çeker.
+     * `absoluteTimestamp` parametresi verilirse (sunucu yeniden başlatıldıktan sonra Hydration için), süreyi anlık olarak 
+     * mevcut zamandan çıkararak hesaplar.
+     * 
+     * @param {string} missionId - Hedef görevin benzersiz ID'si.
+     * @param {number} timeoutMs - Zaman aşımı için geçmesi gereken süre (Milisaniye cinsinden).
+     * @param {Function} callback - Süre dolduğunda tetiklenecek fonksiyon (Örn: `_handleTimeout`).
+     * @param {number} [absoluteTimestamp] - (Opsiyonel) Sistemin yeniden başlatılma durumunda eski hedef zaman (Unix Timestamp).
+     * @returns {number} - Tetikleneceği hedeflenen tam zaman (Unix Timestamp).
      */
     startTimeout(missionId, timeoutMs, callback, absoluteTimestamp = null) {
         this.clearTimeout(missionId);
@@ -63,14 +70,16 @@ class Scheduler {
     }
 
     /**
-     * Akıllı takip zamanlayıcısı başlatır (tek seferlik).
-     * LLM analizi sonucu karşı tarafın belirttiği süre sonunda tetiklenir.
-     * @param {string} missionId - Görev ID
-     * @param {number} delayMs - Bekleme süresi (ms)
-     * @param {string} reason - Takibin nedeni
-     * @param {Function} callback - (missionId, reason) => void
-     * @param {number} [absoluteTimestamp] - (Opsiyonel) Geri yükleme işlemi için tam tetiklenme zamanı
-     * @returns {number} Tetikleneceği tam zaman (timestamp)
+     * @description Akıllı (Otonom) takip zamanlayıcısını başlatır. 
+     * LLM'in `analyzeForFollowUp` metodundan çıkardığı "Kişi yarın sabah dönecek" (Örn: 800 dakika) bilgisini 
+     * alarak gerçek bir Node.js `setTimeout` kurulumu yapar. Süre dolunca bot otonom bir "Hatırlatma" mesajı atar.
+     * 
+     * @param {string} missionId - Hedef görevin benzersiz ID'si.
+     * @param {number} delayMs - LLM'den gelen bekleme süresi (Milisaniye cinsinden).
+     * @param {string} reason - Neden takip yapıldığına dair kısa bilgi ("Dosyayı göndermedi").
+     * @param {Function} callback - Süre dolduğunda çalışacak geri çağırım fonksiyonu.
+     * @param {number} [absoluteTimestamp] - (Opsiyonel) Sistemin yeniden başlatılma durumunda eski hedef zaman (Unix Timestamp).
+     * @returns {number} - Tetikleneceği hedeflenen tam zaman (Unix Timestamp).
      */
     startFollowUpTimeout(missionId, delayMs, reason, callback, absoluteTimestamp = null) {
         this.clearFollowUpTimeout(missionId);

@@ -1,7 +1,9 @@
-// ============================================
-// WhatsApp Otonom Ajan Sistemi — Yapılandırma
-// ============================================
-
+/**
+ * @file config.js
+ * @description Uygulamanın tüm temel konfigürasyonlarını (sahip bilgileri, varsayılan zaman aşımı değerleri, 
+ * komut prefiksleri vb.) barındıran salt okunur yapılandırma nesnesi.
+ * Sistemdeki diğer modüller değerleri buradaki sabitlerden okur.
+ */
 const CONFIG = {
     // Bot Sahibi Bilgileri
     owner: {

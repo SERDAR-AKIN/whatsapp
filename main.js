@@ -1,7 +1,17 @@
-// ============================================
-// WhatsApp Otonom Ajan Sistemi — Ana Giriş Noktası
-// ============================================
-
+/**
+ * @file main.js
+ * @description Otonom WhatsApp Ajanı'nın (Gemini Destekli) ana giriş noktasıdır.
+ * `whatsapp-web.js` kütüphanesini kullanarak WhatsApp Web oturumunu başlatır, 
+ * QR kod ile kimlik doğrulamayı yönetir ve gelen tüm mesaj olaylarını (events) 
+ * dinleyerek `missionManager` ve `commandParser` modüllerine yönlendirir.
+ * 
+ * Sistem başlatıldığında:
+ * 1. Puppeteer üzerinden headless Chrome ayağa kaldırılır.
+ * 2. Eski aktif görevler (`restoreMissions`) diskten belleğe geri yüklenir.
+ * 3. Gemini CLI'nin sağlıklı çalışıp çalışmadığı (`healthCheck`) kontrol edilir.
+ * 
+ * @module MainGateway
+ */
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const MissionManager = require('./src/missionManager');

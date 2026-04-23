@@ -8,11 +8,17 @@ const GeminiClient = require('./geminiClient');
 const aiClient = new GeminiClient();
 
 /**
- * Kullanıcının !ai komutunu ayrıştırarak yapılandırılmış bir görev objesi döndürür.
- * LLM kullanarak görev açıklamasındaki zaman ifadelerini ve tamamlanma koşullarını çıkarır.
+ * @description Kullanıcının `!ai` komutunu ayrıştırarak yapılandırılmış bir görev nesnesi (Mission Object) döndürür.
+ * Verilen görevi hedef numara veya WhatsApp grubuna göre ayırır. Ardından, LLM'i kullanarak görev metnindeki 
+ * örtülü koşulları (`--tone`, `--until` gibi parametreler kullanılmasa bile doğal dilden) çıkarır.
  *
- * @param {string} messageBody - Kullanıcının gönderdiği ham mesaj
- * @returns {Promise<Object|null>} - Ayrıştırılmış görev objesi veya null (geçersiz komut)
+ * @example
+ * const mission = await parseCommand("!ai görev: 90555... Ali'den dosyaları iste", client);
+ * console.log(mission.targetChatId); // "90555...@c.us"
+ * 
+ * @param {string} messageBody - Kullanıcının gönderdiği ham WhatsApp mesajı.
+ * @param {Object} client - whatsapp-web.js istemci nesnesi (Grupları aramak için gereklidir).
+ * @returns {Promise<Object|null>} - Ayrıştırılmış görev objesi (hata varsa `{ error: '...' }` döner, komut değilse `null` döner).
  */
 async function parseCommand(messageBody, client) {
     const body = messageBody.trim();
@@ -95,9 +101,14 @@ async function parseCommand(messageBody, client) {
 }
 
 /**
- * LLM kullanarak görev açıklamasından zaman, tekrar ve tamamlanma koşullarını çıkarır.
- * @param {string} taskDescription
- * @returns {Promise<Object>}
+ * @description Doğal dille yazılmış görev metnini LLM aracılığıyla analiz ederek, opsiyonel parametreleri (tone, completionCondition, retryInterval) çıkarır.
+ * 
+ * @example
+ * // "15 dakikada bir sor, nazik ol" -> { retryInterval: 900000, tone: "nazik" }
+ * 
+ * @param {string} taskDescription - Kullanıcının "Ali'den dosyaları iste" gibi serbest metinli görev açıklaması.
+ * @returns {Promise<Object>} - LLM tarafından çıkarılan opsiyonel değerler (Çıkarılamazsa boş `{}` döner).
+ * @private
  */
 async function extractOptionsWithLLM(taskDescription) {
     const systemPrompt = `Sen bir görev analiz asistanısın. Verilen görev açıklamasını analiz et ve aşağıdaki JSON formatında döndür. Sadece JSON döndür, başka hiçbir şey yazma.
@@ -133,9 +144,14 @@ async function extractOptionsWithLLM(taskDescription) {
 }
 
 /**
- * !stop komutunu ayrıştırır.
- * @param {string} messageBody
- * @returns {string|null} - Durdurulacak görev ID veya 'all'
+ * @description Kullanıcının çalışan bir görevi manuel olarak iptal etmesini sağlayan `!stop` komutunu ayrıştırır.
+ * 
+ * @example
+ * // "!stop m_12345" -> "m_12345"
+ * // "!stop" -> "all"
+ * 
+ * @param {string} messageBody - Kullanıcının gönderdiği mesaj metni.
+ * @returns {string|null} - Durdurulacak görevin spesifik ID'si, tümü için 'all' veya komut değilse null.
  */
 function parseStopCommand(messageBody) {
     const body = messageBody.trim();
@@ -149,9 +165,10 @@ function parseStopCommand(messageBody) {
 }
 
 /**
- * Diğer yardımcı komutları kontrol eder.
- * @param {string} messageBody
- * @returns {string|null} - Komut adı veya null
+ * @description Sistem durumunu sorgulayan `!status` veya aktif görevleri listeleyen `!list` gibi yardımcı (utility) komutları kontrol eder.
+ * 
+ * @param {string} messageBody - Kullanıcının gönderdiği mesaj metni.
+ * @returns {string|null} - Tanınan bir komutsa adını (örn: 'status', 'list'), değilse null döner.
  */
 function parseUtilityCommand(messageBody) {
     const body = messageBody.trim();

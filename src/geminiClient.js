@@ -11,10 +11,14 @@ class GeminiClient {
     }
 
     /**
-     * Gemini CLI üzerinden headless olarak mesaj gönderir.
-     * @param {Array} messages - [{ role: 'system'|'user'|'assistant', content: '...' }]
-     * @param {boolean} useJson - Çıktının zorunlu JSON formatında dönmesi (true/false)
-     * @returns {Promise<string>} - LLM'in cevabı
+     * @description Sistem seviyesinde kurulu olan Gemini CLI aracıyla Node.js `child_process.spawn` üzerinden
+     * asenkron ve headless (arka plan) iletişim kurar. Bu sayede lokal bir LLM veya API anahtarına 
+     * ihtiyaç duymadan Google Gemini'ın gücü kullanılabilir.
+     * 
+     * @param {Array<{role: string, content: string}>} messages - Gönderilecek mesaj geçmişi ve sistem promptu dizisi.
+     * @param {boolean} useJson - Sistemin dönüşünün zorunlu JSON formatında olmasını sağlar (Prompt'a gizli emir ekler).
+     * @returns {Promise<string>} - Gemini CLI'dan dönen standart çıktı (stdout).
+     * @throws {Error} CLI komutu başarısız olursa veya bulunamazsa hata fırlatır.
      */
     async chat(messages, useJson = false) {
         // Mesaj geçmişini tek bir prompt olarak birleştir

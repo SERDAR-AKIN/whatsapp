@@ -1,7 +1,9 @@
-// ============================================
-// WhatsApp Otonom Ajan Sistemi — Ollama İstemcisi
-// ============================================
-
+/**
+ * @file ollamaClient.js
+ * @description Local Ollama API servisiyle haberleşen eski istemci sınıfı.
+ * (Not: Mevcut mimaride Gemini CLI tercih edilmektedir, bu dosya geriye dönük uyumluluk veya 
+ * tamamen yerel LLM senaryoları için tutulmaktadır).
+ */
 const CONFIG = require('./config');
 
 class OllamaClient {
@@ -11,10 +13,12 @@ class OllamaClient {
     }
 
     /**
-     * Ollama /api/chat endpointine mesaj gönderir.
-     * @param {Array} messages - [{ role: 'system'|'user'|'assistant', content: '...' }]
-     * @param {boolean} useJson - Çıktının zorunlu JSON formatında dönmesi (true/false)
-     * @returns {Promise<string>} - LLM'in cevabı
+     * @description Localhost'ta çalışan Ollama sunucusunun `/api/chat` endpoint'ine HTTP POST isteği gönderir.
+     * 
+     * @param {Array<{role: string, content: string}>} messages - Gönderilecek sohbet geçmişi.
+     * @param {boolean} useJson - Modelin sadece JSON dönmesini zorlar (Ollama'nın native `format: "json"` desteğini kullanır).
+     * @returns {Promise<string>} - LLM'in ürettiği metin.
+     * @throws {Error} - Sunucu yanıt vermezse veya 200 harici bir kod dönerse hata fırlatır.
      */
     async chat(messages, useJson = false) {
         const url = `${this.baseUrl}${CONFIG.ollama.chatEndpoint}`;
@@ -44,8 +48,8 @@ class OllamaClient {
     }
 
     /**
-     * Ollama sunucusunun erişilebilir olup olmadığını kontrol eder.
-     * @returns {Promise<boolean>}
+     * @description Ollama sunucusunun erişilebilir olup olmadığını test eder. (Main gateway başlatılırken kullanılır).
+     * @returns {Promise<boolean>} Başarılıysa true, ulaşılamıyorsa false.
      */
     async healthCheck() {
         try {

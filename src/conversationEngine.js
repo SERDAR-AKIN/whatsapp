@@ -9,85 +9,136 @@ const aiClient = new GeminiClient();
 
 class ConversationEngine {
     /**
-     * Görev için system prompt oluşturur.
-     * @param {Object} mission - Görev objesi
-     * @returns {string}
+     * @description Otonom görev için LLM'in kimliğini ve sınırlarını belirleyen 5 katmanlı "System Prompt" oluşturur.
+     * Bu fonksiyon, LLM'in halüsinasyon görmesini engellemek ve JSON çıktısını garanti altına almak için kritik bir rol oynar.
+     * 
+     * Mimarisi şu katmanlardan oluşur:
+     * 1. Kimlik: Asistanın rolü ve kimi temsil ettiği.
+     * 2. Görev Bağlamı: Kullanıcının verdiği `taskDescription`.
+     * 3. Davranış: Üslup (`tone`) ve iletişim kuralları.
+     * 4. Zaman Farkındalığı: Gelen mesajlardaki `[SAAT: ...]` etiketlerini nasıl yorumlaması gerektiği.
+     * 5. Çıktı Kontratı: Sistemin beklediği kati JSON formatı (`reply`, `status`, `memberStatus`).
+     * 
+     * @example
+     * const engine = new ConversationEngine();
+     * const prompt = engine.buildSystemPrompt(missionObj);
+     * // Dönüş: "# KİMLİĞİN\nSen... \n\n# GÖREVİN\n..."
+     * 
+     * @param {Object} mission - Üzerinde çalışılan aktif görev nesnesi.
+     * @param {Object} mission.options - Görev opsiyonları (tone, completionCondition).
+     * @param {boolean} mission.isGroup - Sohbetin bir grup olup olmadığını belirtir.
+     * @returns {string} - Derlenmiş ve Markdown formatında hazırlanmış System Prompt.
      */
     buildSystemPrompt(mission) {
         const completionNote = mission.options.completionCondition
-            ? `\n- Tamamlanma Koşulu: ${mission.options.completionCondition}`
+            ? `\n- Özel Tamamlanma Koşulu: ${mission.options.completionCondition}`
             : '';
 
-        const basePrompt = `Sen ${CONFIG.owner.name}'ın dijital WhatsApp asistanısın.
-Görevlendirildiğin kişiyle onun adına iletişim kuruyorsun. Gerçek bir asistan gibi profesyonel, ancak WhatsApp'a uygun bir doğallıkta konuş.
+        // ═══════════════════════════════════════════════════
+        // KATMAN 1: KİMLİK
+        // ═══════════════════════════════════════════════════
+        const identityLayer = `# KİMLİĞİN
+Sen, ${CONFIG.owner.name}'ın (${CONFIG.owner.shortName}) kişisel WhatsApp asistanısın.
+- Görevlendiren: ${CONFIG.owner.shortName}
+- Rol: ${CONFIG.owner.shortName} adına karşı tarafla iletişim kurmak
+- Platform: WhatsApp (kısa, öz mesajlar yaz; paragraf değil, sohbet tarzında)`;
 
-## Görevin:
-${mission.taskDescription}
+        // ═══════════════════════════════════════════════════
+        // KATMAN 2: GÖREV BAĞLAMI
+        // ═══════════════════════════════════════════════════
+        const missionLayer = `# GÖREVİN
+${mission.taskDescription}`;
 
-## İletişim Kuralları:
-1. İlk mesajında kendini asistan olarak tanıt ve seni ${CONFIG.owner.shortName}'ın görevlendirdiğini MUTLAKA belirt.
-2. ${mission.options.tone} bir üslup kullan. Uzun paragraflar yerine WhatsApp tarzı kısa, öz ve net mesajlar yaz. Emojileri dozunda kullan.
-3. Temsil ettiğin kişiden bahsederken her zaman "${CONFIG.owner.shortName}" ismini açıkça kullan ("o" veya "seni seven kişi" gibi belirsiz ifadeler kullanma).
-4. Karşı taraf konuyu dağıtırsa, nazikçe asıl görev konunuza geri dön.
+        // ═══════════════════════════════════════════════════
+        // KATMAN 3: DAVRANIŞ KURALLARI
+        // ═══════════════════════════════════════════════════
+        const behaviorLayer = `# DAVRANIŞ KURALLARI
+- Üslup: ${mission.options.tone}
+- İlk mesajında mutlaka kendini tanıt: "${CONFIG.owner.shortName}'ın asistanıyım, beni şu konuda görevlendirdi: ..." şeklinde.
+- ${CONFIG.owner.shortName}'dan bahsederken DAİMA ismini kullan. "O", "kendisi", "seni seven kişi" gibi belirsiz ifadeler YASAK.
+- Emojileri doğal ve ölçülü kullan (her mesajda değil, uygun yerlerde).
+- Karşı taraf konuyu dağıtırsa, kibarca görev konusuna geri yönlendir.
+- Tekrara düşme. Aynı mesajı farklı kelimelerle tekrar gönderme; her mesajda yeni bir açı veya yaklaşım dene.`;
 
-## Zaman ve Mantık Farkındalığı:
-- Her mesajın başında göreceğin [SAAT: ...] etiketi anlık zamanı belirtir.
-- Karşı tarafın verdiği süreleri ve sözleri bu saate göre değerlendir.
-- Mantıksız veya çok uzun süreler (örn. "aylar sonra", "seneye") verilirse kabul etme; nazikçe daha yakın bir tarih/çözüm talep et.
-- Süresi dolmuş bir eylem varsa (örn. "5 dakika geçti, halledebildin mi?"), bunu doğal bir dille hatırlat.
-- ASLA kendi göndereceğin mesajda [SAAT: ...] etiketi kullanma.
+        // ═══════════════════════════════════════════════════
+        // KATMAN 4: ZAMAN VE MANTIK FARKINDALIĞI
+        // ═══════════════════════════════════════════════════
+        const awarenessLayer = `# ZAMAN VE MANTIK FARKINDALIĞI
+Her kullanıcı mesajının başında [SAAT: GG.AA.YYYY SS:DD:SS] etiketi bulunur. Bu sana gerçek zamanı bildirir.
 
-## ÇIKTI FORMATI:
-Yanıtını sadece aşağıdaki JSON formatında vermelisin. Başka hiçbir açıklama metni veya markdown bloku ekleme:
+Zaman Kuralları:
+- Karşı taraf belirli bir saat/tarih söylediyse ve o an geçtiyse → "Saati geçmiş görünüyor, halledebildiniz mi?" gibi doğal bir dille sor.
+- "5 dakika sonra" gibi göreceli süreler verildiyse, geçen süreyi hesapla ve gerekirse hatırlat.
+- Geçmişte kalmış bir saati kabul etme ("17:00'de yaparım" ama saat 19:00 ise bunu fark et).
+
+Mantık Kuralları:
+- Makul olmayan süreler (aylar, yıllar) verilirse: empati kur + daha yakın alternatif öner.
+- Belirsiz cevaplar ("belki", "bir ara"): somut bir tarih/saat talep et.
+- Kaçamak cevaplar: ısrarcı ama saygılı ol, çözüm odaklı alternatifler sun.
+
+⚠️ KENDİ mesajlarında [SAAT: ...] etiketi KULLANMA. Bu etiket sadece senin bilgilenmen içindir.`;
+
+        // ═══════════════════════════════════════════════════
+        // KATMAN 5: ÇIKTI KONTRATI
+        // ═══════════════════════════════════════════════════
+        const outputLayer = `# ÇIKTI KONTRATI (ZORUNLU)
+Her yanıtını aşağıdaki JSON yapısında döndür. JSON dışında hiçbir metin, açıklama veya markdown bloğu ekleme.
+
+\`\`\`
 {
-  "reply": "Karşı tarafa göndereceğin mesaj metni",
-  "status": "active",
-  "memberStatus": { "Kişi1": "Durumu" }
+  "reply": "<string: karşı tarafa gönderilecek mesaj>",
+  "status": "<string: active | completed | failed>",
+  "memberStatus": { "<kişi_adı>": "<durum_açıklaması>" }
 }
+\`\`\`
 
-Durum (status) Kuralları:
-- Görev devam ediyorsa "active".
-- Karşı taraf işin KESİN OLARAK YAPILDIĞINI teyit ederse "completed" (Sözler "active" kalır).
-- Görev KESİN REDDEDİLDİYSE "failed".
+Status Belirleme Kuralları:
+- "active" → Görev devam ediyor. Karşı taraf söz verdi ama henüz yapmadı; veya diyalog sürüyor.
+- "completed" → Karşı taraf işi YAPTIĞINI KESİN olarak teyit etti (örn: "yaptım", "gönderdim", dekont paylaştı). Sözler veya niyetler "completed" DEĞİLDİR.
+- "failed" → Karşı taraf görevi KESİN olarak reddetti ve alternatiflere de kapalı.
 ${completionNote}`;
 
+        // ═══════════════════════════════════════════════════
+        // KATMAN 5+: GRUP EKİ (koşullu)
+        // ═══════════════════════════════════════════════════
+        let groupLayer = '';
         if (mission.isGroup) {
-            let groupInstruction = `
-## GRUP SOHBETİ BİLGİLENDİRMESİ (ÇOK ÖNEMLİ):
-Şu an birebir bir sohbette değil, BİR GRUP SOHBETİNDESİN.
-- Grupta birden fazla kişi olabilir. Sana gelen mesajların başında konuşan kişinin ismi yazacaktır (Örn: "[Ali]: Selam").
-- Yanıt verirken ilgili kişiye İSMİYLE HİTAP ET.
-- Asla sadece tek bir kişiye odaklanıp grubun diğer üyelerini yok sayma.
-`;
-            return basePrompt + groupInstruction;
+            groupLayer = `\n# GRUP SOHBETİ KURALLARI
+Bu bir grup sohbetidir, birebir değil.
+- Mesajlar "[KişiAdı]: mesaj" formatında gelecek. Her kişiyi isminden tanı.
+- Yanıt verirken ilgili kişiye ismiyle hitap et.
+- Tüm grup üyelerini takip et; sadece bir kişiye odaklanma.
+- memberStatus alanında her kişinin durumunu ayrı ayrı raporla.`;
         }
 
-        return basePrompt;
+        return [identityLayer, missionLayer, behaviorLayer, awarenessLayer, outputLayer, groupLayer]
+            .filter(Boolean)
+            .join('\n\n');
     }
 
     /**
-     * Görev için LLM'den ilk mesajı üretir.
-     * @param {Object} mission - Görev objesi
-     * @returns {Promise<string>} - Gönderilecek ilk mesaj
+     * @description Görev başlatıldığında LLM'den ilk açılış mesajını otonom olarak üretir.
+     * `buildSystemPrompt` çıktısını `mission.systemPrompt` olarak bellekte (ve dolaylı olarak JSON'da) kaydeder.
+     * Bu sayede system prompt, mesaj havuzu (conversationHistory) içinde her defasında tekrar edilmemiş olur.
+     * Sadece "Görevi başlat." tetikleyicisiyle LLM'i ilk cevabı yazmaya zorlar.
+     * 
+     * @throws {Error} LLM API'ye erişilemediğinde hata fırlatabilir (missionManager içinde yakalanır).
+     * 
+     * @param {Object} mission - Üzerinde çalışılan aktif görev nesnesi.
+     * @returns {Promise<string>} - Karşı tarafa WhatsApp üzerinden gönderilecek ilk temiz mesaj.
      */
     async generateFirstMessage(mission) {
-        const systemPrompt = this.buildSystemPrompt(mission);
+        // System prompt'u mission'a kaydet (sonraki çağrılarda yeniden kullanılacak)
+        mission.systemPrompt = this.buildSystemPrompt(mission);
 
-        const messages = [
-            { role: 'system', content: systemPrompt },
-            {
-                role: 'user',
-                content: 'Şimdi bu kişiyle sohbeti başlat. İlk mesajını yaz. Sadece mesaj metnini yaz, başka bir şey ekleme.',
-            },
-        ];
-
-        const response = await aiClient.chat(messages, true);
+        const response = await aiClient.chat([
+            { role: 'system', content: mission.systemPrompt },
+            { role: 'user', content: 'Görevi başlat.' },
+        ], true);
         const { cleanMessage } = this._processResponse(response);
 
-        // Sohbet geçmişine ekle (temiz metin olarak, JSON kirliliği önlenir)
+        // Geçmişe sadece asistan cevabını ekle (system prompt ayrıca saklanıyor)
         mission.conversationHistory.push(
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: 'Şimdi bu kişiyle sohbeti başlat. İlk mesajını yaz.' },
             { role: 'assistant', content: cleanMessage }
         );
         mission.messageCount++;
@@ -96,10 +147,18 @@ ${completionNote}`;
     }
 
     /**
-     * Hedef kişiden gelen mesaja LLM ile cevap üretir.
-     * @param {Object} mission - Görev objesi
-     * @param {string} incomingMessage - Hedef kişiden gelen mesaj
-     * @returns {Promise<{message: string, status: string, memberStatus: Object}>}
+     * @description Karşı taraftan veya gruptan gelen mesaja bağlam çerçevesinde yanıt üretir.
+     * **Zaman Farkındalığı (Time Awareness):** Gelen her mesaja gizlice `[SAAT: GG.AA.YYYY SS:DD:SS]` 
+     * etiketini enjekte eder. Böylece LLM gerçek dünyadaki zamanı algılar ve geçmiş/gelecek kipleriyle 
+     * zaman hesaplamasını otonom yapar.
+     * 
+     * @example
+     * const replyData = await engine.generateReply(mission, "Tamam dosyayı yarın atarım");
+     * console.log(replyData.status); // "active" (Henüz atılmadığı için)
+     * 
+     * @param {Object} mission - Geçmiş bağlamı (`conversationHistory`) barındıran aktif görev nesnesi.
+     * @param {string} incomingMessage - Karşı tarafın attığı (mesaj havuzundan gelen birleştirilmiş) mesaj.
+     * @returns {Promise<{message: string, status: string, memberStatus: Object}>} - Çözümlenmiş LLM yanıtı ve görev durum kararı.
      */
     async generateReply(mission, incomingMessage) {
         // Mevcut saati mesajın başına ekle (zaman farkındalığı)
@@ -113,7 +172,13 @@ ${completionNote}`;
             content: timeTaggedMessage,
         });
 
-        const response = await aiClient.chat(mission.conversationHistory, true);
+        // System prompt'u history'nin başına enjekte ederek gönder
+        const fullMessages = [
+            { role: 'system', content: mission.systemPrompt },
+            ...mission.conversationHistory,
+        ];
+
+        const response = await aiClient.chat(fullMessages, true);
         const { cleanMessage, status, memberStatus } = this._processResponse(response);
 
         // Cevabı geçmişe ekle (temiz metin olarak, JSON kirliliği önlenir)
@@ -127,12 +192,16 @@ ${completionNote}`;
     }
 
     /**
-     * Karşı tarafın mesajını analiz ederek otomatik takip zamanlaması çıkarır.
-     * Eğer karşı taraf "5 dakika sonra yaparım" gibi bir süre belirtmişse,
-     * o süre sonunda tekrar hatırlatma yapılması için zamanlama bilgisi döner.
-     *
-     * @param {Object} mission - Görev objesi
-     * @returns {Promise<{needsFollowUp: boolean, followUps: Array}>}
+     * @description Sohbet bağlamını analiz ederek, karşı tarafın eylem sözü (commitment) verip vermediğini denetler.
+     * Eğer karşı taraf "10 dakika sonra atarım", "akşama bakarım" gibi ifadeler kullandıysa, bu durumu 
+     * yakalar ve dakika (`delayMinutes`) cinsinden scheduler için matematiksel bir bekleme süresi döner.
+     * 
+     * **Edge Case (Uç Durum):** LLM, aylar veya yıllar sonrasına mantıksız bir süre (`delayMinutes: 1440` ve `isUnreasonable: true`) 
+     * döndürebilir. Bu durum `missionManager` tarafından engellenir ve maksimum süre sınırlarına (örn: 2 saat) çekilir.
+     * 
+     * @param {Object} mission - Aktif görev nesnesi.
+     * @returns {Promise<{needsFollowUp: boolean, followUps: Array<{target: string, delayMinutes: number, isUnreasonable: boolean, reason: string}>}>} 
+     *          - Takip gerekip gerekmediğini ve gerekiyorsa kim için ne kadar bekleneceğini içeren yapılandırılmış JSON nesnesi.
      */
     async analyzeForFollowUp(mission) {
         const isGroup = mission.isGroup || false;
@@ -146,31 +215,51 @@ ${completionNote}`;
         const now = new Date();
         const currentTime = now.toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' });
 
-        const analysisPrompt = `Aşağıdaki WhatsApp sohbetini analiz et. Karşı taraf bir eylem gerçekleştireceğine veya iş yapacağına dair söz verdi mi? Verdiyse, ne kadar süre sonra yapacağını tespit et.
+        const analysisPrompt = `# GÖREV
+Aşağıdaki WhatsApp sohbetini analiz et ve karşı tarafın bir eylem sözü verip vermediğini tespit et.
 
-ŞU ANKİ ZAMAN: ${currentTime}
-GÖREV: Karşı taraf spesifik bir saat veya tarih verdiyse, şu anki zamanla kıyaslayıp aradaki farkı dakika cinsinden hesaplayarak 'delayMinutes' alanına yaz. Eğer belirsiz bir söz varsa (örn: "yaparım", "hallederim") 10-60 dakika arası makul bir bekleme süresi ata.
+# BAĞLAM
+Görev açıklaması: ${mission.taskDescription}
+Şu anki zaman: ${currentTime}
+Sohbet tipi: ${isGroup ? 'Grup sohbeti (mesajlar [KişiAdı]: formatında)' : 'Birebir sohbet'}
 
-Sohbet:
+# SON MESAJLAR
 ${recentMessages}
 
-Çıktı Formatı (SADECE JSON):
+# ANALİZ TALİMATLARI
+1. Karşı taraf bir iş yapacağına dair söz verdi mi? (örn: "yaparım", "gönderirim", "bakarım")
+2. Ne zaman yapacağını belirtti mi? Belirttiyse, şu anki zamanla aradaki farkı dakika cinsinden hesapla.
+3. Verilen süre makul mü? (1 haftayı aşan süreler genellikle makul değildir)
+4. Kesin teyit veya ret varsa takip gerekmez.
+
+Süre Referansı:
+| İfade | delayMinutes |
+|-------|-------------|
+| "hemen", "şimdi", "birazdan" | 5 |
+| "yaparım", "hallederim", "bakarım" (belirsiz) | 15 |
+| "yarım saat", "biraz sonra" | 30 |
+| "1 saat sonra" | 60 |
+| "akşam", "akşama" | ilgili saate kadar kalan dakika |
+| "yarın" | 720 |
+| "bu hafta", "birkaç gün" | 1440 |
+| "aylar sonra", "seneye" (makul değil) | 1440, isUnreasonable=true |
+
+# ÇIKTI (SADECE JSON)
 {
-  "needsFollowUp": true veya false,
+  "needsFollowUp": <boolean>,
   "followUps": [
     {
-      "target": "Sözü veren kişinin ismi (Grup değilse 'Kişi' yazabilirsin)",
-      "delayMinutes": sayı,
-      "isUnreasonable": true veya false,
-      "reason": "kısa açıklama"
+      "target": "<string: kişi adı veya 'Kişi'>",
+      "delayMinutes": <number: dakika cinsinden bekleme>,
+      "isUnreasonable": <boolean: süre mantıksız mı>,
+      "reason": "<string: kısa açıklama>"
     }
   ]
-}
-${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Birden fazla kişinin sözünü ayrı ayrı followUp nesnesi olarak döndür.' : ''}`;
+}${isGroup ? '\n\nGRUP NOTU: Her kişinin sözünü ayrı bir followUp nesnesi olarak döndür.' : ''}`;
 
         try {
             const response = await aiClient.chat([
-                { role: 'system', content: 'Sen bir analiz asistanısın. Sadece JSON döndür.' },
+                { role: 'system', content: 'Sen bir zamanlama analiz motorusun. Sadece geçerli JSON döndür, başka hiçbir metin ekleme.' },
                 { role: 'user', content: analysisPrompt },
             ], true);
 
@@ -216,7 +305,7 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Birden fazla kişinin sözünü
      */
     async generateFollowUp(mission, followUpReason) {
         const reasonNote = followUpReason
-            ? ` Takip nedeni: ${followUpReason}.`
+            ? `Neden: ${followUpReason}`
             : '';
 
         // Mevcut saati hesapla (zaman farkındalığı)
@@ -226,10 +315,22 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Birden fazla kişinin sözünü
         // Takip talimatını geçmişe ekle
         mission.conversationHistory.push({
             role: 'user',
-            content: `[SİSTEM NOTU — SAAT: ${currentTime}] Karşı tarafın söylediği süre doldu.${reasonNote} Şu anki saati dikkate alarak durumu değerlendir. Eğer karşı taraf daha önce belirli bir saat vermişse (ve o saat geçtiyse), bunu nazikçe hatırlat. Doğal ol, "süreniz doldu" gibi robotik konuşma. Sanki normal bir insan gibi "nasıl oldu, halledebildiniz mi?" tarzında sor. Önceki mesajlarını tekrarlama, farklı bir yaklaşım dene.`,
+            content: `[SİSTEM NOTU — SAAT: ${currentTime}]
+Beklenen süre doldu. ${reasonNote}
+Talimatlar:
+- Durumu doğal bir dille sor ("Nasıl oldu, halledebildiniz mi?" gibi).
+- Eğer karşı taraf daha önce belirli bir saat vermişse ve o saat geçtiyse, bunu kibarca hatırlat.
+- Önceki mesajlarından farklı bir yaklaşım veya açı kullan.
+- Sohbet tarzını koru, resmi/robotik olma.`,
         });
 
-        const response = await aiClient.chat(mission.conversationHistory, true);
+        // System prompt'u history'nin başına enjekte ederek gönder
+        const fullMessages = [
+            { role: 'system', content: mission.systemPrompt },
+            ...mission.conversationHistory,
+        ];
+
+        const response = await aiClient.chat(fullMessages, true);
         const { cleanMessage, status, memberStatus } = this._processResponse(response);
 
         // Cevabı geçmişe ekle (temiz metin olarak)
@@ -262,7 +363,12 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Birden fazla kişinin sözünü
             const summaryResponse = await aiClient.chat([
                 {
                     role: 'system',
-                    content: 'Aşağıdaki WhatsApp sohbetini 1-2 cümleyle özetle. Sadece sonucu ve önemli bilgileri belirt. Türkçe yaz.',
+                    content: `Sen bir görev raporlama asistanısın. Aşağıdaki WhatsApp sohbetini analiz et ve Türkçe 1-2 cümlelik bir özet yaz.
+Özette şunları belirt:
+- Görevin sonucu (başarılı mı, başarısız mı)
+- Karşı tarafın son tutumu veya taahhüdü
+- Varsa önemli detaylar (tarih, miktar, koşul vb.)
+Gereksiz detayları atla, sadece sonuç ve çıkarımı yaz.`,
                 },
                 { role: 'user', content: chatSummary },
             ]);
@@ -293,71 +399,63 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Birden fazla kişinin sözünü
     }
 
     /**
-     * LLM cevabındaki kontrol etiketlerini ayıklar.
-     * @param {string} response - LLM'in ham cevabı
-     * @returns {{cleanMessage: string, status: string}}
+     * @description LLM'den dönen kirli (Markdown blokları ve açıklamalar içeren) çıktıyı temizleyerek güvenli JSON/Metin parçalarına böler.
+     * Bu fonksiyon sistemin hataya karşı dayanıklılığının (resilience) anahtarıdır.
+     * 
+     * **Çalışma Süreci (3 Adım):**
+     * 1. **Parse:** Önce regex ile `{ ... }` bloğunu arar ve JSON olarak parse etmeyi dener.
+     * 2. **Fallback:** Eğer JSON bozuksa (örn. eksik tırnak), regex ile sadece `"reply": "..."` kalıbının içini kurtarmaya çalışır.
+     * 3. **Clean:** LLM'in yanlışlıkla bıraktığı `[SAAT: ...]` veya `asistan:` gibi serseri rolleri metinden temizler.
+     * 
      * @private
+     * @param {string} response - Gemini CLI veya API'den gelen ham metin (genellikle Markdown + JSON).
+     * @returns {{cleanMessage: string, status: string, memberStatus: Object}} - Arıtılmış ve güvenli hale getirilmiş yapı.
      */
     _processResponse(response) {
         let status = 'active';
         let cleanMessage = response;
         let memberStatus = {};
 
+        // ── 1. ADIM: JSON Ayrıştırma ──
         try {
             const jsonMatch = response.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 const parsed = JSON.parse(jsonMatch[0]);
-                if (parsed.reply !== undefined) {
-                    cleanMessage = parsed.reply;
-                } else if (parsed.content !== undefined) {
-                    cleanMessage = parsed.content;
-                } else if (parsed.message !== undefined) {
-                    cleanMessage = parsed.message;
-                } else {
-                    // Eğer beklenen hiçbir anahtar yoksa ham JSON'u gönderme, temizlemeye çalış
-                    cleanMessage = response.replace(/[\{\}"]/g, '').trim();
-                }
+
+                // reply alanını çıkar (öncelik sırasıyla)
+                cleanMessage = parsed.reply ?? parsed.content ?? parsed.message ?? response.replace(/[\{\}\"]/g, '').trim();
+
                 if (parsed.status) status = parsed.status;
                 if (parsed.memberStatus) memberStatus = parsed.memberStatus;
             } else {
-                // Fallback: If no JSON is found, treat the whole response as the message
+                // JSON bulunamadı → ham metin olarak kullan
                 cleanMessage = response.trim();
             }
         } catch (e) {
-            console.error("⚠️ LLM JSON formatında cevap veremedi, ham metin ayrıştırılacak:", e.message);
-            cleanMessage = response;
-            
-            // Eğer string "reply": ile başlıyorsa, içeriğini çıkarmaya çalış
+            // ── 2. ADIM: Bozuk JSON Kurtarma (Fallback) ──
+            console.warn('⚠️ JSON ayrıştırma hatası, kurtarma deneniyor:', e.message);
+
+            // "reply": "..." kalıbını regex ile çıkar
             const replyMatch = response.match(/"reply"\s*:\s*"([\s\S]*?)("(?=\s*,)|"(?=\s*\})|$)/);
-            if (replyMatch && replyMatch[1]) {
+            if (replyMatch?.[1]) {
                 cleanMessage = replyMatch[1];
             } else {
-                // Temel JSON yapılarını temizle
-                cleanMessage = response.replace(/[\{\}]/g, '')
-                                       .replace(/"reply"\s*:\s*/g, '')
-                                       .replace(/"status"\s*:\s*".*?"/g, '')
-                                       .replace(/"memberStatus"\s*:\s*.*/g, '')
-                                       .trim();
-                
-                // Başta ve sonda kalan serseri tırnakları temizle
-                if (cleanMessage.startsWith('"')) cleanMessage = cleanMessage.substring(1);
-                if (cleanMessage.endsWith('"')) cleanMessage = cleanMessage.slice(0, -1);
+                // Son çare: JSON yapı artıklarını temizle
+                cleanMessage = response
+                    .replace(/[\{\}]/g, '')
+                    .replace(/"reply"\s*:\s*/g, '')
+                    .replace(/"status"\s*:\s*".*?"/g, '')
+                    .replace(/"memberStatus"\s*:\s*.*/g, '')
+                    .replace(/^"|"$/g, '')
+                    .trim();
             }
         }
 
-        // Geriye dönük uyumluluk veya JSON dışı cevaplar için etiket kontrolü
-        if (cleanMessage.includes(CONFIG.tags.completed)) {
-            status = 'completed';
-            cleanMessage = cleanMessage.replace(CONFIG.tags.completed, '').trim();
-        } else if (cleanMessage.includes(CONFIG.tags.failed)) {
-            status = 'failed';
-            cleanMessage = cleanMessage.replace(CONFIG.tags.failed, '').trim();
-        }
+        // ── 3. ADIM: Son Temizlik ──
+        // [SAAT: ...] etiketi sızdıysa temizle
+        cleanMessage = cleanMessage.replace(/\[SAAT:\s*[\d.:\/\s]+\]/g, '').trim();
 
-        // LLM yine de [SAAT: ...] etiketini cevaba eklediyse temizle
-        cleanMessage = cleanMessage.replace(/\[SAAT:\s*\d{2}:\d{2}\]/g, '').trim();
-
-        // Yaygın LLM hatalarını temizle (başta kalan "reply:", "asistan:" vb. etiketleri sil)
+        // Başta kalan rol etiketlerini temizle
         cleanMessage = cleanMessage.replace(/^(reply|asistan|cevap|message|content|bot|assistant)\s*:\s*/i, '').trim();
 
         return { cleanMessage, status, memberStatus };
@@ -381,3 +479,4 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Birden fazla kişinin sözünü
 }
 
 module.exports = ConversationEngine;
+

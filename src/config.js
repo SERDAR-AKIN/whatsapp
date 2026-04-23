@@ -9,11 +9,9 @@ const CONFIG = {
         shortName: 'Serdar',  // Sohbetlerde kullanılacak kısa isim
     },
 
-    // Ollama Sunucu Ayarları
-    ollama: {
-        baseUrl: 'http://192.168.1.123:11434',
-        model: 'gemma4:26b',
-        chatEndpoint: '/api/chat',
+    // Gemini CLI Ayarları
+    gemini: {
+        model: 'gemini-2.5-flash', // Veya istediğiniz model adı
     },
 
     // Görev Varsayılan Ayarları

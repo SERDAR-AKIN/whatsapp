@@ -5,8 +5,9 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const MissionManager = require('./src/missionManager');
-const OllamaClient = require('./src/ollamaClient');
+const GeminiClient = require('./src/geminiClient');
 const { parseCommand, parseStopCommand, parseUtilityCommand } = require('./src/commandParser');
+const CONFIG = require('./src/config');
 
 // WhatsApp Client oluştur
 const client = new Client({
@@ -29,8 +30,8 @@ const client = new Client({
 // Görev Yöneticisi
 const missionManager = new MissionManager(client);
 
-// Ollama bağlantı kontrolü
-const ollama = new OllamaClient();
+// Gemini bağlantı kontrolü
+const aiClient = new GeminiClient();
 
 // ============================================
 // WhatsApp Olayları
@@ -49,11 +50,11 @@ client.once('ready', async () => {
     const myNumber = client.info.wid.user;
     missionManager.setMyNumber(myNumber);
 
-    // Ollama sunucu kontrolü
-    const ollamaOk = await ollama.healthCheck();
-    console.log(ollamaOk
-        ? '🧠 Ollama sunucusu bağlı ve hazır.'
-        : '⚠️ Ollama sunucusuna ulaşılamıyor! Görevler başlatılamayacak.'
+    // Gemini sunucu/CLI kontrolü
+    const aiOk = await aiClient.healthCheck();
+    console.log(aiOk
+        ? '🧠 Gemini CLI bağlantısı başarılı ve hazır.'
+        : '⚠️ Gemini CLI ulaşılamıyor veya kurulu değil! Görevler başlatılamayacak.'
     );
 
     // Kalıcı hafızayı geri yükle
@@ -64,8 +65,8 @@ client.once('ready', async () => {
     console.log('  ✅ WhatsApp Otonom Ajan Sistemi Hazır!');
     console.log('═══════════════════════════════════════════');
     console.log(`  📱 Hesap : ${myNumber}`);
-    console.log(`  🧠 Model : gemma4:26b`);
-    console.log(`  🌐 Ollama: ${ollamaOk ? 'Bağlı ✅' : 'Bağlantı Yok ❌'}`);
+    console.log(`  🧠 Model : ${CONFIG.gemini?.model || 'Varsayılan'}`);
+    console.log(`  🌐 Gemini: ${aiOk ? 'Bağlı ✅' : 'Bağlantı Yok ❌'}`);
     console.log('');
     console.log('  Komutlar:');
     console.log('  !ai <numara> <görev>  → Yeni görev başlat');

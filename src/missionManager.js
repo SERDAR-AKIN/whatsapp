@@ -93,6 +93,9 @@ class MissionManager {
                     (mId, reason) => this._handleFollowUp(mId, reason)
                 );
                 mission.timers.followUpReason = 'İlk mesaja henüz cevap gelmedi';
+                // Faz 3 uyumlu: individualFollowUps'a da kaydet (restoreMissions tutarlılığı için)
+                if (!mission.timers.individualFollowUps) mission.timers.individualFollowUps = {};
+                mission.timers.individualFollowUps[mission.id] = mission.timers.nextFollowUpAt;
             }
 
             // Zaman aşımı zamanlayıcısı
@@ -251,7 +254,11 @@ class MissionManager {
             console.log(`👥 Grup Durum Matrisi (#${mission.id}):`, JSON.stringify(mission.memberStatus));
         }
 
-        // Cevabı WhatsApp'tan gönder
+        // Cevabı WhatsApp'tan gönder (boş mesaj kontrolü)
+        if (!message || message.trim() === '') {
+            console.warn(`⚠️ LLM boş mesaj üretti (#${mission.id}), gönderilmedi.`);
+            return;
+        }
         await this.client.sendMessage(chatId, message);
         console.log(`📤 Ajan cevabı (#${mission.id}): ${message}`);
 
@@ -523,15 +530,21 @@ class MissionManager {
             return '📋 Aktif görev bulunmuyor.';
         }
 
-        let report = `📋 Aktif Görevler (${this.activeMissions.size}):\n`;
+        // Deduplikasyon: Aynı mission hem targetChatId hem alternativeChatId ile map'te olabilir
+        const seen = new Set();
+        let count = 0;
+        let report = '';
         for (const [, mission] of this.activeMissions) {
+            if (seen.has(mission.id)) continue;
+            seen.add(mission.id);
+            count++;
             const elapsed = this._getElapsedTime(mission.createdAt);
             report += `\n🔹 #${mission.id} → ${mission.targetNumber}`;
             report += `\n   📋 ${mission.taskDescription.substring(0, 60)}...`;
             report += `\n   💬 ${mission.messageCount} mesaj | ⏱️ ${elapsed}\n`;
         }
 
-        return report;
+        return `📋 Aktif Görevler (${count}):\n${report}`;
     }
 
     /**

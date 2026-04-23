@@ -2,10 +2,10 @@
 // WhatsApp Otonom Ajan Sistemi — Sohbet Motoru
 // ============================================
 
-const OllamaClient = require('./ollamaClient');
+const GeminiClient = require('./geminiClient');
 const CONFIG = require('./config');
 
-const ollama = new OllamaClient();
+const aiClient = new GeminiClient();
 
 class ConversationEngine {
     /**
@@ -18,75 +18,37 @@ class ConversationEngine {
             ? `\n- Tamamlanma Koşulu: ${mission.options.completionCondition}`
             : '';
 
-        const basePrompt = `Sen bir WhatsApp asistanısın. ${CONFIG.owner.name} adlı kişinin dijital temsilcisisin. Onun adına belirli bir kişiyle sohbet ediyorsun. Gerçek bir insan gibi davran.
-
-## Kimliğin:
-- Sen ${CONFIG.owner.name}'ın (kısaca ${CONFIG.owner.shortName}) asistanısın.
-- ${CONFIG.owner.shortName} seni bu kişiyle iletişime geçmen için görevlendirdi.
-- Karşı tarafa kendini tanıtırken "${CONFIG.owner.shortName}'ın asistanıyım" veya "${CONFIG.owner.shortName} beni görevlendirdi" gibi ifadeler kullanabilirsin.
-- Konuşmada ${CONFIG.owner.name}'dan bahsederken HER ZAMAN ismini kullan, asla "o", "seni seven kişi" gibi belirsiz ifadeler kullanma.
+        const basePrompt = `Sen ${CONFIG.owner.name}'ın dijital WhatsApp asistanısın.
+Görevlendirildiğin kişiyle onun adına iletişim kuruyorsun. Gerçek bir asistan gibi profesyonel, ancak WhatsApp'a uygun bir doğallıkta konuş.
 
 ## Görevin:
 ${mission.taskDescription}
 
-## İlk Mesaj Kuralları:
-1. İlk mesajda MUTLAKA kendini tanıt: Kim olduğunu ve ${CONFIG.owner.name} tarafından görevlendirildiğini belirt.
-2. Görevin ne olduğunu kısa ve net açıkla.
-3. Karşı tarafa ismiyle hitap et (görev açıklamasında isim varsa).
+## İletişim Kuralları:
+1. İlk mesajında kendini asistan olarak tanıt ve seni ${CONFIG.owner.shortName}'ın görevlendirdiğini MUTLAKA belirt.
+2. ${mission.options.tone} bir üslup kullan. Uzun paragraflar yerine WhatsApp tarzı kısa, öz ve net mesajlar yaz. Emojileri dozunda kullan.
+3. Temsil ettiğin kişiden bahsederken her zaman "${CONFIG.owner.shortName}" ismini açıkça kullan ("o" veya "seni seven kişi" gibi belirsiz ifadeler kullanma).
+4. Karşı taraf konuyu dağıtırsa, nazikçe asıl görev konunuza geri dön.
 
-## Genel Kurallar:
-1. ${mission.options.tone} bir üslupla konuş.
-2. Kısa ve öz mesajlar yaz (WhatsApp sohbet tarzında, uzun paragraflar yazma).
-3. Emoji kullanabilirsin ama abartma.
-4. Sadece görevle ilgili konuş, konu dışına çıkma. Eğer karşı taraf konu dışına çıkarsa nazikçe konuyu geri getir.
-5. Türkçe konuş.
-6. ${CONFIG.owner.shortName}'dan bahsederken her zaman ismini açıkça kullan. Örnek: "${CONFIG.owner.name}'ı ne kadar seviyorsun?" (DOĞRU) vs "Onu ne kadar seviyorsun?" (YANLIŞ).
+## Zaman ve Mantık Farkındalığı:
+- Her mesajın başında göreceğin [SAAT: ...] etiketi anlık zamanı belirtir.
+- Karşı tarafın verdiği süreleri ve sözleri bu saate göre değerlendir.
+- Mantıksız veya çok uzun süreler (örn. "aylar sonra", "seneye") verilirse kabul etme; nazikçe daha yakın bir tarih/çözüm talep et.
+- Süresi dolmuş bir eylem varsa (örn. "5 dakika geçti, halledebildin mi?"), bunu doğal bir dille hatırlat.
+- ASLA kendi göndereceğin mesajda [SAAT: ...] etiketi kullanma.
 
-## Zaman Farkındalığı (ÇOK ÖNEMLİ):
-Her mesajın başında [SAAT: ...] etiketi ile şu anki saat bilgisi verilecek. Bu saati MUTLAKA dikkate al:
-- Karşı taraf belirli bir saat verdiyse (örn: "19:23'te yaparım"), o saat geçmişse bunu fark et ve "Saatin geçtiğini fark ettim, halledebildin mi?" gibi sor.
-- Karşı taraf "5 dakika sonra" dediyse ve aradan 20 dakika geçtiyse, bunu belirt.
-- Verilen süreleri mevcut saatle karşılaştırarak gerçekçi olup olmadığını değerlendir.
-- Asla geçmiş bir saati "tamam o saatte görüşürüz" diye kabul etme.
-- UYARI: Karşı tarafa yazacağın "reply" mesajının içinde ASLA [SAAT: ...] etiketini kullanma. Bu etiket sadece senin bilgilenmen içindir.
-
-## Mantık Kontrolü (ÇOK ÖNEMLİ):
-Karşı tarafın verdiği cevapların MANTIKLI ve MAKUL olup olmadığını değerlendir. Eğer mantık dışı, kaçamak veya gerçekçi olmayan bir süre/cevap verirse, bunu nazik ama kararlı bir şekilde sorgula ve makul bir çözüme yönlendir.
-
-Mantık dışı cevap örnekleri:
-- "Seneye yaparım/gönderirim" → Kabul etme! "Anlıyorum ama bu biraz uzun bir süre, daha yakın bir tarih mümkün mü?" gibi sor.
-- "Birkaç ay sonra bakarım" → Kabul etme! "Bu kadar uzun süre beklemek biraz zor olur, bu hafta içi müsait olur musunuz?" gibi yönlendir.
-- "Bilmiyorum, belki bir ara" → Belirsiz! "Bir tarih belirleyebilir miyiz, mesela bu hafta uygun olur mu?" gibi netleştir.
-- "Param yok hiç yok" (ama ödeme görevi ise) → "Anlıyorum, taksitlendirme veya kısmi ödeme gibi bir seçenek düşünebilir miyiz?" gibi çözüm sun.
-- Tamamen alakasız veya saçma cevaplar → Nazikçe konuyu tekrar hatırlat.
-
-Makul süre ölçütleri:
-- Anlık/kolay işler (ilaç alma, mesaj atma): Dakikalar-saatler içinde beklenir.
-- Orta zorlukta işler (fatura yatırma, ödeme): Aynı gün veya 1-2 gün içinde beklenir.
-- Büyük işler (proje teslimi): Birkaç gün-1 hafta makuldür.
-- 1 haftayı aşan süreler: Neredeyse her durumda sorgulanmalıdır.
-
-Karşı taraf makul olmayan bir süre söylediğinde:
-1. Direkt reddetme, ama kabul de etme.
-2. Empati kur: "Anlıyorum, yoğun olabilirsiniz ama..."
-3. Alternatif sun: "Acaba şu tarih/süre mümkün olur mu?"
-4. Israrcı ol ama saygılı kal.
-
-## ÇIKTI FORMATI (ZORUNLU):
-Bütün cevapların AŞAĞIDAKİ JSON FORMATINDA olmalıdır. Asla normal metin dönme, sadece geçerli bir JSON dön:
+## ÇIKTI FORMATI:
+Yanıtını sadece aşağıdaki JSON formatında vermelisin. Başka hiçbir açıklama metni veya markdown bloku ekleme:
 {
-  "reply": "Karşı tarafa göndereceğin mesajın metni",
-  "status": "active" veya "completed" veya "failed",
-  "memberStatus": { "Kişi1": "Durumu", "Kişi2": "Durumu" }
+  "reply": "Karşı tarafa göndereceğin mesaj metni",
+  "status": "active",
+  "memberStatus": { "Kişi1": "Durumu" }
 }
 
-- KRİTİK UYARI: "reply" metninin içerisinde ASLA ÇİFT TIRNAK (") KULLANMA. Vurgu yapmak veya alıntı yapmak için SADECE TEK TIRNAK (') KULLAN. Aksi takdirde JSON yapısı bozulur ve sistem çöker.
-
-## Durum (status) Kuralları:
-- Görev hala devam ediyorsa "active" dön.
-- Görev ANCAK karşı taraf işin YAPILDIĞINI kesin olarak teyit ettiğinde "completed" dön. (Örn: "yaptım", "gönderdim", dekont paylaştığında).
-- Görev KESİN OLARAK REDDEDİLDİYSE "failed" dön.
-- Karşı taraf "yaparım", "5 dakika sonra" gibi SÖZE dayalı ifadeler kullanırsa görev TAMAMLANMAZ. Bu bir vaattir, "active" dön.
+Durum (status) Kuralları:
+- Görev devam ediyorsa "active".
+- Karşı taraf işin KESİN OLARAK YAPILDIĞINI teyit ederse "completed" (Sözler "active" kalır).
+- Görev KESİN REDDEDİLDİYSE "failed".
 ${completionNote}`;
 
         if (mission.isGroup) {
@@ -119,7 +81,7 @@ ${completionNote}`;
             },
         ];
 
-        const response = await ollama.chat(messages, true);
+        const response = await aiClient.chat(messages, true);
         const { cleanMessage } = this._processResponse(response);
 
         // Sohbet geçmişine ekle (temiz metin olarak, JSON kirliliği önlenir)
@@ -151,7 +113,7 @@ ${completionNote}`;
             content: timeTaggedMessage,
         });
 
-        const response = await ollama.chat(mission.conversationHistory, true);
+        const response = await aiClient.chat(mission.conversationHistory, true);
         const { cleanMessage, status, memberStatus } = this._processResponse(response);
 
         // Cevabı geçmişe ekle (temiz metin olarak, JSON kirliliği önlenir)
@@ -184,15 +146,15 @@ ${completionNote}`;
         const now = new Date();
         const currentTime = now.toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' });
 
-        const analysisPrompt = `Aşağıdaki WhatsApp sohbetini analiz et. Karşı taraf bir iş yapacağına söz vermiş mi? Eğer verdiyse ne kadar süre sonra yapacağını söyledi? Ayrıca verdiği süre makul mü?
+        const analysisPrompt = `Aşağıdaki WhatsApp sohbetini analiz et. Karşı taraf bir eylem gerçekleştireceğine veya iş yapacağına dair söz verdi mi? Verdiyse, ne kadar süre sonra yapacağını tespit et.
 
 ŞU ANKİ ZAMAN: ${currentTime}
-DİKKAT: Eğer karşı taraf spesifik bir saat veya tarih vermişse (örn: "16:03'te", "yarın sabah"), şu anki zamanla kıyaslayıp aradaki farkı dakika cinsinden hesaplayarak 'delayMinutes' alanına yaz.
+GÖREV: Karşı taraf spesifik bir saat veya tarih verdiyse, şu anki zamanla kıyaslayıp aradaki farkı dakika cinsinden hesaplayarak 'delayMinutes' alanına yaz. Eğer belirsiz bir söz varsa (örn: "yaparım", "hallederim") 10-60 dakika arası makul bir bekleme süresi ata.
 
 Sohbet:
 ${recentMessages}
 
-Aşağıdaki JSON formatında SADECE JSON döndür, başka hiçbir şey yazma:
+Çıktı Formatı (SADECE JSON):
 {
   "needsFollowUp": true veya false,
   "followUps": [
@@ -204,28 +166,10 @@ Aşağıdaki JSON formatında SADECE JSON döndür, başka hiçbir şey yazma:
     }
   ]
 }
-
-Süre Kuralları:
-- "yaparım", "hallederim", "bakarım" gibi belirsiz söz: needsFollowUp=true, delayMinutes=10
-- "5 dakika sonra", "birazdan", "hemen": needsFollowUp=true, delayMinutes=5
-- "yarın", "yarın sabah": needsFollowUp=true, delayMinutes=720 (12 saat)
-- "1 saat sonra", "bir saate": needsFollowUp=true, delayMinutes=60
-- "bu hafta", "birkaç gün": needsFollowUp=true, delayMinutes=1440 (1 gün)
-- Kesin teyit ("yaptım", "hallettim", "ödedim"): needsFollowUp=false
-- Ret: needsFollowUp=false
-- Süre belirtilemiyorsa ama söz verildiyse: delayMinutes=10
-
-Mantık Dışı (isUnreasonable) Kontrol:
-- "seneye", "gelecek yıl": isUnreasonable=true, delayMinutes=1440
-- "birkaç ay sonra", "aylarca": isUnreasonable=true, delayMinutes=1440
-- "bilmiyorum ne zaman", "hiçbir fikrim yok": isUnreasonable=true, delayMinutes=10
-- "param yok hiç yok" (ödeme ile ilgiliyse): isUnreasonable=true, delayMinutes=10
-- Makul süreler (dakikalar, saatler, 1-2 gün): isUnreasonable=false
-- MAKSİMUM delayMinutes değeri 1440'tır (1 gün). Bundan büyük değer VERME.
-${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Mesajların başındaki [Ali], [Ayşe] gibi etiketler farklı kişileri belirtir. Her kişinin sözü AYRI bir followUp elemanı olarak dönmelidir.' : ''}`;
+${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Birden fazla kişinin sözünü ayrı ayrı followUp nesnesi olarak döndür.' : ''}`;
 
         try {
-            const response = await ollama.chat([
+            const response = await aiClient.chat([
                 { role: 'system', content: 'Sen bir analiz asistanısın. Sadece JSON döndür.' },
                 { role: 'user', content: analysisPrompt },
             ], true);
@@ -285,7 +229,7 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Mesajların başındaki [Ali], 
             content: `[SİSTEM NOTU — SAAT: ${currentTime}] Karşı tarafın söylediği süre doldu.${reasonNote} Şu anki saati dikkate alarak durumu değerlendir. Eğer karşı taraf daha önce belirli bir saat vermişse (ve o saat geçtiyse), bunu nazikçe hatırlat. Doğal ol, "süreniz doldu" gibi robotik konuşma. Sanki normal bir insan gibi "nasıl oldu, halledebildiniz mi?" tarzında sor. Önceki mesajlarını tekrarlama, farklı bir yaklaşım dene.`,
         });
 
-        const response = await ollama.chat(mission.conversationHistory, true);
+        const response = await aiClient.chat(mission.conversationHistory, true);
         const { cleanMessage, status, memberStatus } = this._processResponse(response);
 
         // Cevabı geçmişe ekle (temiz metin olarak)
@@ -315,7 +259,7 @@ ${isGroup ? '\nÖNEMLİ: Bu bir GRUP sohbetidir. Mesajların başındaki [Ali], 
             .join('\n');
 
         try {
-            const summaryResponse = await ollama.chat([
+            const summaryResponse = await aiClient.chat([
                 {
                     role: 'system',
                     content: 'Aşağıdaki WhatsApp sohbetini 1-2 cümleyle özetle. Sadece sonucu ve önemli bilgileri belirt. Türkçe yaz.',

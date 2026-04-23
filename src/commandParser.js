@@ -3,9 +3,9 @@
 // ============================================
 
 const CONFIG = require('./config');
-const OllamaClient = require('./ollamaClient');
+const GeminiClient = require('./geminiClient');
 
-const ollama = new OllamaClient();
+const aiClient = new GeminiClient();
 
 /**
  * Kullanıcının !ai komutunu ayrıştırarak yapılandırılmış bir görev objesi döndürür.
@@ -115,7 +115,7 @@ async function extractOptionsWithLLM(taskDescription) {
 - "nazik bir şekilde hatırlat" → tone: "nazik ve profesyonel"`;
 
     try {
-        const response = await ollama.chat([
+        const response = await aiClient.chat([
             { role: 'system', content: systemPrompt },
             { role: 'user', content: taskDescription },
         ]);

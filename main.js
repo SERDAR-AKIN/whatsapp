@@ -47,6 +47,10 @@ const aiClient = new GeminiClient();
 // WhatsApp Olayları
 // ============================================
 
+let readyFired = false;
+let authTimeout = null;
+let isRestarting = false;
+
 client.on('qr', (qr) => {
     console.log('📲 QR Code taratın:');
     qrcode.generate(qr, { small: true });
@@ -57,6 +61,8 @@ client.on('loading_screen', (percent, message) => {
 });
 
 client.once('ready', async () => {
+    readyFired = true;
+    if (authTimeout) clearTimeout(authTimeout);
     const myNumber = client.info.wid.user;
     missionManager.setMyNumber(myNumber);
 
@@ -89,7 +95,30 @@ client.once('ready', async () => {
 });
 
 client.on('authenticated', () => {
+    if (readyFired || isRestarting) return;
     console.log('🔐 Kimlik doğrulama başarılı, senkronize ediliyor...');
+    
+    if (authTimeout) clearTimeout(authTimeout);
+    
+    // WhatsApp-web.js'te bilinen bir sorun: İlk girişte ready eventi bazen tetiklenmiyor.
+    // Kullanıcının manuel olarak Ctrl+C yapıp tekrar başlatmasını otomatikleştiriyoruz.
+    authTimeout = setTimeout(async () => {
+        if (!readyFired && !isRestarting) {
+            isRestarting = true;
+            console.log('⚠️ Senkronizasyon çok uzun sürdü (ready event alınamadı).');
+            console.log('🔄 İstemci otomatik olarak arka planda yeniden başlatılıyor...');
+            try {
+                await client.destroy();
+                // Tarayıcının kapanması için kısa bir süre bekle
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                isRestarting = false;
+                client.initialize();
+            } catch (err) {
+                console.error('❌ Yeniden başlatma başarısız oldu:', err);
+                isRestarting = false;
+            }
+        }
+    }, 15000); // 15 saniye bekle
 });
 
 client.on('auth_failure', (msg) => {

@@ -156,14 +156,12 @@ class MissionManager {
             mission = this._findMissionByChatId(`${contactNumber}@c.us`);
         }
 
-        // Eğer hala bulunamadıysa ve bu bir @lid ise, eşleştirilmemiş tek bir aktif görevi kontrol et (Smart Fallback)
-        if (!mission && chatId.endsWith('@lid')) {
-            const pendingPrivateMissions = Array.from(this.activeMissions.values()).filter(m => !m.isGroup && !m.alternativeChatId && m.targetChatId !== chatId);
-            if (pendingPrivateMissions.length === 1) {
-                mission = pendingPrivateMissions[0];
-                console.log(`🧠 Smart Fallback: ${chatId} bilinmeyen LID'i #${mission.id} görevine eşleştirildi.`);
-            }
-        }
+        // ─────────────────────────────────────────────
+        // NOT: Eski "Smart Fallback" mekanizması kaldırıldı.
+        // Tek aktif görev varken LID'i o göreve tahmin ederek eşleştiriyordu.
+        // Bu yaklaşım kırılgandı (2+ görevde sessiz başarısızlık).
+        // Artık LID çözümlemesi merkezi LidResolver modülü üzerinden yapılıyor.
+        // ─────────────────────────────────────────────
 
         if (!mission) return false; // Bu kişiye aktif görev yok
 
@@ -188,20 +186,25 @@ class MissionManager {
             return;
         }
 
-        // Mevcut periyodik zamanlayıcıyı temizle (cevap geldi, eski periyodik takip gereksiz)
-        this.scheduler.clearInterval(mission.id);
-        // Bireysel zamanlayıcıları KORUYARAK sadece genel (görev seviyesi) zamanlayıcıyı sil
-        // Grup modunda bireysel zamanlayıcıları silME - onlar kişiye özel
-        if (!mission.isGroup) {
-            this.scheduler.clearFollowUpTimeout(mission.id);
-        }
+        // ─────────────────────────────────────────────
+        // NOT: Zamanlayıcı temizleme ARTIK burada yapılmıyor.
+        // Takip iptali, LLM cevabından sonra _processReply içinde
+        // context-aware olarak gerçekleştirilir. (Kusur #2 Düzeltmesi)
+        // ─────────────────────────────────────────────
 
         // Birebir veya Grup fark etmeksizin spam'ı önlemek için havuza ekle
         if (!mission.messageQueue) mission.messageQueue = [];
         mission.messageQueue.push(formattedBody);
 
         if (!mission.timers.throttleTimeoutActive) {
-            const throttleMs = 15000;
+            // ─────────────────────────────────────────────
+            // Adaptif Throttle (Kusur #6 Düzeltmesi):
+            // İlk mesaj için 5s (daha hızlı yanıt), sonraki mesajlar için 15s
+            // ─────────────────────────────────────────────
+            const isFirstReply = !mission.firstReplyReceived;
+            const throttleMs = isFirstReply ? 5000 : 15000;
+            mission.firstReplyReceived = true;
+
             const chatType = mission.isGroup ? "Grup" : "Birebir";
             console.log(`⏳ ${chatType} mesajı havuza alındı (#${mission.id}). ${throttleMs/1000} saniye bekleniyor...`);
             
@@ -211,12 +214,19 @@ class MissionManager {
                 // ⚠️ throttleTimeoutActive işlem bitene kadar true KALIR (yarış koşulu önlemi)
                 await this._processReply(mId, replyChatId);
 
-                // İşlem sırasında yeni mesaj geldiyse, kısa bekleyip tekrar işle
+                // ─────────────────────────────────────────────
+                // Drain Döngüsü (Kusur #3 Düzeltmesi):
+                // Ara iterasyonlar skipFollowUpAnalysis=true ile çağrılır.
+                // Sadece son iterasyon (kuyruk boşalınca) tam pipeline çalıştırır.
+                // ─────────────────────────────────────────────
                 const drainMs = 15000;
                 while (mission.messageQueue && mission.messageQueue.length > 0 && mission.status === 'active') {
                     console.log(`⏳ İşlem sırasında ${mission.messageQueue.length} yeni mesaj birikti (#${mission.id}). ${drainMs/1000}s beklenip işlenecek...`);
                     await new Promise(r => setTimeout(r, drainMs));
-                    await this._processReply(mId, replyChatId);
+                    // Drain'deki ara adımda kuyrukta hâlâ mesaj olup olmadığını kontrol et
+                    // Eğer bu son iterasyonsa (kuyruk boşalacaksa) tam pipeline çalıştır
+                    const willHaveMore = mission.messageQueue && mission.messageQueue.length > 1;
+                    await this._processReply(mId, replyChatId, { skipFollowUpAnalysis: willHaveMore });
                 }
 
                 mission.timers.throttleTimeoutActive = false; // Ancak tüm kuyruk boşaldıktan sonra serbest bırak
@@ -237,7 +247,9 @@ class MissionManager {
      * @param {string} chatId - WhatsApp sohbet (chat) ID'si.
      * @returns {Promise<void>}
      */
-    async _processReply(missionId, chatId) {
+    async _processReply(missionId, chatId, options = {}) {
+        const { skipFollowUpAnalysis = false } = options;
+
         const mission = this._findMissionById(missionId);
         if (!mission || mission.status !== 'active') return;
 
@@ -271,7 +283,7 @@ class MissionManager {
             }
         }
 
-        const { message, status, memberStatus } = llmResult;
+        const { message, status, memberStatus, relevance } = llmResult;
 
         // Gruptaki kişilerin durumunu güncelle ve logla
         if (mission.isGroup && Object.keys(memberStatus || {}).length > 0) {
@@ -294,6 +306,36 @@ class MissionManager {
         } else if (status === 'failed') {
             await this._completeMission(mission, 'failed');
             return;
+        }
+
+        // ─────────────────────────────────────────────
+        // Relevance-Aware Zamanlayıcı Stratejisi
+        // (Kusur #2, #3, #4, #5 Düzeltmeleri)
+        // ─────────────────────────────────────────────
+
+        // OFF_TOPIC mesajlarda zamanlayıcılara DOKUNMA (Kusur #5)
+        // Mevcut zamanlayıcılar korunur, görev konusu zorlanmaz.
+        if (relevance === 'off_topic') {
+            console.log(`💬 Görev dışı mesaj algılandı (#${mission.id}), zamanlayıcılar korunuyor.`);
+            this._saveState();
+            return;
+        }
+
+        // Drain döngüsünün ara iterasyonlarında takip analizi ATLA (Kusur #3)
+        if (skipFollowUpAnalysis) {
+            console.log(`⏩ Drain iterasyonu — takip analizi atlanıyor (#${mission.id}).`);
+            this._saveState();
+            return;
+        }
+
+        // ─────────────────────────────────────────────
+        // Zamanlayıcı Temizleme (Kusur #2 Düzeltmesi):
+        // Artık LLM cevabından SONRA ve yeni zamanlayıcı
+        // kurulmadan HEMEN ÖNCE yapılır.
+        // ─────────────────────────────────────────────
+        this.scheduler.clearInterval(mission.id);
+        if (!mission.isGroup) {
+            this.scheduler.clearFollowUpTimeout(mission.id);
         }
 
         // ─────────────────────────────────────────────
@@ -340,7 +382,6 @@ class MissionManager {
                     mission.options.retryInterval,
                     (mId) => this._handleFollowUp(mId)
                 );
-                this.scheduler.clearFollowUpTimeout(mission.id);
             } else {
                 // ⏳ Hiçbir zamanlayıcı yok → varsayılan geri düşüş
                 console.log(`⏳ Varsayılan takip bekleniyor (#${mission.id}): 30 dakika`);
@@ -586,40 +627,33 @@ class MissionManager {
     }
 
     /**
-     * Chat ID veya Telefon Numarası ile görevi bulur (lid vs c.us toleransı).
+     * Chat ID veya Telefon Numarası ile görevi bulur.
+     * LID çözümlemesi artık merkezi LidResolver tarafından yapıldığı için,
+     * bu metod sadece @c.us, @g.us ve alternativeChatId eşleştirmesi yapar.
+     * 
      * @param {string} chatId - Gelen mesajın chatId'si
      * @returns {Object|undefined}
      * @private
      */
     _findMissionByChatId(chatId) {
-        // Tam eşleşme kontrolü (activeMissions map'inden)
+        // 1. Tam eşleşme kontrolü (activeMissions map'inden — O(1))
         if (this.activeMissions.has(chatId)) {
             return this.activeMissions.get(chatId);
         }
 
-        // Toleranslı arama: Sadece numara kısmını ayıkla
-        // Örn: "90507...17@c.us" -> "90507...17"
-        // Örn: "9707...77@lid" -> "9707...77" (Eğer numaralar uyuşuyorsa diye, 
-        // ama LID genellikle farklıdır. Bu yüzden asıl çözüm numarayı targetNumber ile eşleştirmek)
-        
-        // Eğer chatId içinde @lid veya @c.us varsa, bu bir gruptan veya özelden gelmiş olabilir
-        // Numara tabanlı eşleşme için hedef numarayı kontrol et
+        // 2. Numara tabanlı eşleşme: chatId'nin numara kısmını targetNumber ile karşılaştır
+        //    Bu, LidResolver'dan gelen contactNumber@c.us formatıyla çalışır.
         const incomingNumber = chatId.split('@')[0];
 
         for (const [, mission] of this.activeMissions) {
-            // Hedef numara, gelen chatId'nin içinde geçiyorsa (veya tam tersi) eşleşme kabul et
-            // Bu, bazı LID formatlarında numaranın görünmediği durumları kapsamayabilir.
-            // WhatsApp Web JS'de genellikle Message.author veya Message.from kullanılır.
-            if (chatId === mission.targetChatId || chatId === mission.alternativeChatId) {
+            // alternativeChatId üzerinden eşleşme (geriye dönük uyumluluk)
+            if (chatId === mission.alternativeChatId) {
                 return mission;
             }
-            // Çok zorlayıcı tolerans: Gelen numara targetNumber ile aynı mı?
+            // Numara eşleşmesi: örn "905xxxxxxxxxx" === mission.targetNumber
             if (incomingNumber === mission.targetNumber) {
                 return mission;
             }
-            // @lid durumlarında, eğer bu kişiden gelen İLK mesajsa, main.js'de
-            // `message.from` numarası üzerinden bir eşleştirme de yapılabilirdi, ama 
-            // `handleIncomingMessage` doğrudan `message.from` alıyor.
         }
 
         return undefined;

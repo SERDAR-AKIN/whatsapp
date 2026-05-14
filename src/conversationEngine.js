@@ -235,7 +235,7 @@ Bu bir grup sohbetidir, birebir değil.
         const lastNonSystemMessage = [...mission.conversationHistory]
             .reverse()
             .find(m => m.role !== 'system' && !m.content.startsWith('[SİSTEM'));
-        
+
         if (lastNonSystemMessage && lastNonSystemMessage.role === 'assistant') {
             console.log(`🔍 Son mesaj bottan geldi (#${mission.id}), takip analizi atlanıyor — cevap bekleniyor.`);
             return { needsFollowUp: false, followUps: [] };

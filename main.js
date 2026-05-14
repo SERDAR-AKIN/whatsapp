@@ -154,6 +154,39 @@ async function routeToMission(message, overrideChatId = null) {
         // Hata olursa null kalır
     }
 
+    // Eğer WhatsApp Web JS standart yollarla (contact.number) gerçek numarayı getiremediyse
+    // ve bu bir LID (Linked Device) mesajıysa, WhatsApp Web'in dahili API'lerini 
+    // Puppeteer üzerinden sorgulayarak gerçek telefon numarasını öğreniyoruz.
+    if (!contactNumber && senderChatId.endsWith('@lid')) {
+        try {
+            const phoneStr = await client.pupPage.evaluate(async (lidStr) => {
+                try {
+                    const wid = window.require('WAWebWidFactory').createWid(lidStr);
+                    // 1. WhatsApp API'sinden LID ile ilişkili telefon numarasını iste
+                    let phoneWid = window.require('WAWebApiContact').getPhoneNumber(wid);
+                    
+                    // 2. Eğer ilk denemede bulunamadıysa (Wid Cache'de yoksa), sunucudan sorgula
+                    if (!phoneWid) {
+                        const queryResult = await window.require('WAWebQueryExistsJob').queryWidExists(wid);
+                        if (queryResult && queryResult.wid) {
+                            phoneWid = window.require('WAWebApiContact').getPhoneNumber(queryResult.wid);
+                        }
+                    }
+                    return phoneWid ? phoneWid._serialized : null;
+                } catch (err) {
+                    return null;
+                }
+            }, senderChatId);
+
+            if (phoneStr) {
+                contactNumber = phoneStr.split('@')[0];
+                console.log(`🧠 [GELİŞMİŞ LID ÇÖZÜCÜ]: ${senderChatId} -> ${contactNumber} olarak tespit edildi.`);
+            }
+        } catch (e) {
+            console.log(`⚠️ LID Çözümleme hatası: ${e.message}`);
+        }
+    }
+
     const handled = await missionManager.handleIncomingMessage(senderChatId, body, contactNumber, senderName);
     if (handled) {
         console.log(`📥 [GÖREV YÖNLENDİRİLDİ] (${senderChatId}): ${body}`);

@@ -156,6 +156,15 @@ class MissionManager {
             mission = this._findMissionByChatId(`${contactNumber}@c.us`);
         }
 
+        // Eğer hala bulunamadıysa ve bu bir @lid ise, eşleştirilmemiş tek bir aktif görevi kontrol et (Smart Fallback)
+        if (!mission && chatId.endsWith('@lid')) {
+            const pendingPrivateMissions = Array.from(this.activeMissions.values()).filter(m => !m.isGroup && !m.alternativeChatId && m.targetChatId !== chatId);
+            if (pendingPrivateMissions.length === 1) {
+                mission = pendingPrivateMissions[0];
+                console.log(`🧠 Smart Fallback: ${chatId} bilinmeyen LID'i #${mission.id} görevine eşleştirildi.`);
+            }
+        }
+
         if (!mission) return false; // Bu kişiye aktif görev yok
 
         // İlk kez farklı bir chatId formatıyla karşılaştıysak kaydet (@lid vs @c.us haritalama)

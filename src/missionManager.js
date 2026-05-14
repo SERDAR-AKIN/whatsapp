@@ -4,12 +4,15 @@
 
 const fs = require('fs');
 const path = require('path');
+const { EventEmitter } = require('events');
 const ConversationEngine = require('./conversationEngine');
 const Scheduler = require('./scheduler');
+const { MissionStateMachine } = require('./stateMachine');
 const CONFIG = require('./config');
 
-class MissionManager {
+class MissionManager extends EventEmitter {
     constructor(whatsappClient) {
+        super(); // EventEmitter başlat
         this.client = whatsappClient;
         this.activeMissions = new Map(); // targetChatId → Mission
         this.conversationEngine = new ConversationEngine();
@@ -57,7 +60,9 @@ class MissionManager {
 
         try {
             // Görevi aktif olarak kaydet ve timers objesini başlat
-            mission.status = 'active';
+            mission.stateMachine = new MissionStateMachine('pending');
+            mission.stateMachine.transition('active', 'Görev başlatıldı');
+            mission.status = mission.stateMachine.state;
             mission.timers = {};
             mission.isGroup = mission.targetChatId.endsWith('@g.us');
             this.activeMissions.set(mission.targetChatId, mission);
@@ -107,6 +112,13 @@ class MissionManager {
 
             // Diske kaydet
             this._saveState();
+
+            // Event yayınla (Faz 2C)
+            this.emit('mission:started', {
+                missionId: mission.id,
+                target: mission.targetNumber,
+                task: mission.taskDescription,
+            });
 
             // Seçenekleri formatla
             const retryInfo = mission.options.retryInterval
@@ -298,6 +310,14 @@ class MissionManager {
         }
         await this.client.sendMessage(chatId, message);
         console.log(`📤 Ajan cevabı (#${mission.id}): ${message}`);
+
+        // Event yayınla (Faz 2C)
+        this.emit('mission:reply_sent', {
+            missionId: mission.id,
+            message: message,
+            relevance: relevance || 'on_topic',
+            target: mission.targetNumber,
+        });
 
         // Görev durumunu kontrol et
         if (status === 'completed') {
@@ -520,7 +540,18 @@ class MissionManager {
      * @private
      */
     async _completeMission(mission, status, reason) {
-        mission.status = status;
+        // State Machine ile gücül durum geçişi
+        try {
+            if (mission.stateMachine && mission.stateMachine.canTransition(status)) {
+                mission.stateMachine.transition(status, reason || `Görev ${status}`);
+                mission.status = mission.stateMachine.state;
+            } else {
+                mission.status = status; // Geriye dönük uyumluluk
+            }
+        } catch (e) {
+            console.warn(`⚠️ Durum geçişi hatası (#${mission.id}):`, e.message);
+            mission.status = status;
+        }
         mission.completedAt = new Date().toISOString();
 
         // Zamanlayıcıları temizle
@@ -549,6 +580,14 @@ class MissionManager {
         // Log dosyasına kaydet
         this._saveLog(mission);
         this._saveState();
+
+        // Event yayınla (Faz 2C)
+        this.emit('mission:completed', {
+            missionId: mission.id,
+            status: mission.status,
+            reason: reason || null,
+            target: mission.targetNumber,
+        });
     }
 
     /**
@@ -560,9 +599,18 @@ class MissionManager {
         if (missionId === 'all') {
             const count = this.activeMissions.size;
             for (const [, mission] of this.activeMissions) {
-                mission.status = 'stopped';
+                // State Machine ile geçiş
+                try {
+                    if (mission.stateMachine && mission.stateMachine.canTransition('stopped')) {
+                        mission.stateMachine.transition('stopped', 'Kullanıcı tarafından durduruldu');
+                        mission.status = mission.stateMachine.state;
+                    } else {
+                        mission.status = 'stopped';
+                    }
+                } catch { mission.status = 'stopped'; }
                 mission.completedAt = new Date().toISOString();
                 this._saveLog(mission);
+                this.emit('mission:stopped', { missionId: mission.id, target: mission.targetNumber });
             }
             this.activeMissions.clear();
             this.scheduler.clearEverything();
@@ -575,7 +623,15 @@ class MissionManager {
             return `⚠️ Görev bulunamadı: ${missionId}`;
         }
 
-        mission.status = 'stopped';
+        // State Machine ile geçiş
+        try {
+            if (mission.stateMachine && mission.stateMachine.canTransition('stopped')) {
+                mission.stateMachine.transition('stopped', 'Kullanıcı tarafından durduruldu');
+                mission.status = mission.stateMachine.state;
+            } else {
+                mission.status = 'stopped';
+            }
+        } catch { mission.status = 'stopped'; }
         mission.completedAt = new Date().toISOString();
         this.scheduler.clearAll(mission.id);
         this.activeMissions.delete(mission.targetChatId);
@@ -584,6 +640,10 @@ class MissionManager {
         }
         this._saveLog(mission);
         this._saveState();
+
+        // Event yayınla (Faz 2C)
+        this.emit('mission:stopped', { missionId: mission.id, target: mission.targetNumber });
+
         return `🛑 Görev durduruldu: #${mission.id}`;
     }
 
@@ -761,6 +821,14 @@ class MissionManager {
                 this.activeMissions.set(mission.targetChatId, mission);
                 if (mission.alternativeChatId) {
                     this.activeMissions.set(mission.alternativeChatId, mission);
+                }
+
+                // State Machine hydration (Faz 2B)
+                if (mission.stateMachine) {
+                    mission.stateMachine = MissionStateMachine.fromJSON(mission.stateMachine);
+                } else {
+                    // Geriye dönük uyumluluk: eski görevlerde SM yoktu
+                    mission.stateMachine = new MissionStateMachine(mission.status || 'active');
                 }
 
                 // Zamanlayıcıları kontrol et (Time Travel)

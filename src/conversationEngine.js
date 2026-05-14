@@ -2,10 +2,10 @@
 // WhatsApp Otonom Ajan Sistemi — Sohbet Motoru
 // ============================================
 
-const GeminiClient = require('./geminiClient');
+const LLMRouter = require('./llmRouter');
 const CONFIG = require('./config');
 
-const aiClient = new GeminiClient();
+const aiClient = new LLMRouter();
 
 class ConversationEngine {
     /**
@@ -57,8 +57,17 @@ ${mission.taskDescription}`;
 - İlk mesajında mutlaka kendini tanıt: "${CONFIG.owner.shortName}'ın asistanıyım, beni şu konuda görevlendirdi: ..." şeklinde.
 - ${CONFIG.owner.shortName}'dan bahsederken DAİMA ismini kullan. "O", "kendisi", "seni seven kişi" gibi belirsiz ifadeler YASAK.
 - Emojileri doğal ve ölçülü kullan (her mesajda değil, uygun yerlerde).
-- Karşı taraf konuyu dağıtırsa, kibarca görev konusuna geri yönlendir.
-- Tekrara düşme. Aynı mesajı farklı kelimelerle tekrar gönderme; her mesajda yeni bir açı veya yaklaşım dene.`;
+- Tekrara düşme. Aynı mesajı farklı kelimelerle tekrar gönderme; her mesajda yeni bir açı veya yaklaşım dene.
+
+## GÖREV İLGİSİ ALGILAMA
+- Karşı tarafın mesajı görevle ALAKASIZ olabilir (selamlaşma, şaka, kişisel sohbet, "çay hazır" gibi günlük mesajlar).
+- Bu durumda:
+  → Kısa ve doğal bir karşılık ver (maksimum 1 cümle). Konuyu ZORLA görev konusuna ÇEKMEYİN.
+  → Eğer üst üste 2+ alakasız mesaj geldiyse, nazikçe "Bu arada [görev konusu] hakkında bir gelişme var mı?" gibi doğal bir geçiş yap.
+  → Tek bir alakasız mesaj geldiyse sadece doğal karşılık ver, görev konusunu hiç açma.
+- YANLIŞ: "Afiyet olsun! 😊 Peki poliçe ne durumda?"
+- DOĞRU: "Afiyet olsun! 😊" (sonraki mesajı bekle)
+- Görevle ilgili olmayan mesajlarda relevance alanını "off_topic" olarak işaretle.`;
 
         // ═══════════════════════════════════════════════════
         // KATMAN 4: ZAMAN VE MANTIK FARKINDALIĞI
@@ -88,6 +97,7 @@ Her yanıtını aşağıdaki JSON yapısında döndür. JSON dışında hiçbir 
 {
   "reply": "<string: karşı tarafa gönderilecek mesaj>",
   "status": "<string: active | completed | failed>",
+  "relevance": "<string: on_topic | off_topic | partial>",
   "memberStatus": { "<kişi_adı>": "<durum_açıklaması>" }
 }
 \`\`\`
@@ -96,6 +106,11 @@ Status Belirleme Kuralları:
 - "active" → Görev devam ediyor. Karşı taraf söz verdi ama henüz yapmadı; veya diyalog sürüyor.
 - "completed" → Karşı taraf işi YAPTIĞINI KESİN olarak teyit etti (örn: "yaptım", "gönderdim", dekont paylaştı). Sözler veya niyetler "completed" DEĞİLDİR.
 - "failed" → Karşı taraf görevi KESİN olarak reddetti ve alternatiflere de kapalı.
+
+Relevance Belirleme Kuralları:
+- "on_topic" → Mesaj doğrudan görevle ilgili (poliçe, dosya, iş konusu vb.).
+- "off_topic" → Mesaj görevle tamamen ilgisiz (selamlaşma, şaka, günlük sohbet).
+- "partial" → Mesaj kısmen ilgili veya belirsiz ("Hazır" gibi görevle de ilgili olabilecek ifadeler).
 ${completionNote}`;
 
         // ═══════════════════════════════════════════════════
@@ -172,6 +187,13 @@ Bu bir grup sohbetidir, birebir değil.
             content: timeTaggedMessage,
         });
 
+        // ─────────────────────────────────────────────
+        // Context Sıkıştırma (Faz 2D):
+        // Uzun konuşmalarda token limiti aşılmasını önlemek için
+        // eski mesajları özetle ve sıkıştır.
+        // ─────────────────────────────────────────────
+        await this._compressHistoryIfNeeded(mission);
+
         // System prompt'u history'nin başına enjekte ederek gönder
         const fullMessages = [
             { role: 'system', content: mission.systemPrompt },
@@ -179,7 +201,7 @@ Bu bir grup sohbetidir, birebir değil.
         ];
 
         const response = await aiClient.chat(fullMessages, true);
-        const { cleanMessage, status, memberStatus } = this._processResponse(response);
+        const { cleanMessage, status, memberStatus, relevance } = this._processResponse(response);
 
         // Cevabı geçmişe ekle (temiz metin olarak, JSON kirliliği önlenir)
         mission.conversationHistory.push({
@@ -188,7 +210,7 @@ Bu bir grup sohbetidir, birebir değil.
         });
         mission.messageCount++;
 
-        return { message: cleanMessage, status, memberStatus };
+        return { message: cleanMessage, status, memberStatus, relevance };
     }
 
     /**
@@ -204,6 +226,21 @@ Bu bir grup sohbetidir, birebir değil.
      *          - Takip gerekip gerekmediğini ve gerekiyorsa kim için ne kadar bekleneceğini içeren yapılandırılmış JSON nesnesi.
      */
     async analyzeForFollowUp(mission) {
+        // ─────────────────────────────────────────────
+        // Akıllı Son-Mesaj Kontrolü (Kusur #7 Düzeltmesi):
+        // Eğer sohbetin son mesajı bottan geldiyse (bot soru sordu),
+        // takip analizi yapma — karşı taraftan cevap beklenmeli.
+        // Bu, circular reasoning'i (bot soru sordu → belirsizlik var → takip kur) engeller.
+        // ─────────────────────────────────────────────
+        const lastNonSystemMessage = [...mission.conversationHistory]
+            .reverse()
+            .find(m => m.role !== 'system' && !m.content.startsWith('[SİSTEM'));
+        
+        if (lastNonSystemMessage && lastNonSystemMessage.role === 'assistant') {
+            console.log(`🔍 Son mesaj bottan geldi (#${mission.id}), takip analizi atlanıyor — cevap bekleniyor.`);
+            return { needsFollowUp: false, followUps: [] };
+        }
+
         const isGroup = mission.isGroup || false;
         // Sohbet geçmişinden son birkaç mesajı al
         const recentMessages = mission.conversationHistory
@@ -415,6 +452,7 @@ Gereksiz detayları atla, sadece sonuç ve çıkarımı yaz.`,
         let status = 'active';
         let cleanMessage = response;
         let memberStatus = {};
+        let relevance = 'on_topic'; // Varsayılan: görevle ilgili
 
         // ── 1. ADIM: JSON Ayrıştırma ──
         try {
@@ -427,6 +465,7 @@ Gereksiz detayları atla, sadece sonuç ve çıkarımı yaz.`,
 
                 if (parsed.status) status = parsed.status;
                 if (parsed.memberStatus) memberStatus = parsed.memberStatus;
+                if (parsed.relevance) relevance = parsed.relevance;
             } else {
                 // JSON bulunamadı → ham metin olarak kullan
                 cleanMessage = response.trim();
@@ -458,7 +497,72 @@ Gereksiz detayları atla, sadece sonuç ve çıkarımı yaz.`,
         // Başta kalan rol etiketlerini temizle
         cleanMessage = cleanMessage.replace(/^(reply|asistan|cevap|message|content|bot|assistant)\s*:\s*/i, '').trim();
 
-        return { cleanMessage, status, memberStatus };
+        return { cleanMessage, status, memberStatus, relevance };
+    }
+
+    /**
+     * @description Konuşma geçmişi belirli bir eşiği aştığında eski mesajları LLM ile
+     * özetleyerek sıkıştırır. Bu sayede token limiti aşılmaz ve bağlam korunur.
+     * 
+     * Çalışma prensibi:
+     * 1. Geçmiş 16 mesajı aştığında tetiklenir
+     * 2. Son 6 mesaj korunur (güncel bağlam)
+     * 3. Eski mesajlar LLM ile 3-4 cümlelik özete dönüştürülür
+     * 4. Özet, [BAĞLAM ÖZETİ] etiketi ile geçmişin başına eklenir
+     * 
+     * @private
+     * @param {Object} mission - Aktif görev nesnesi
+     */
+    async _compressHistoryIfNeeded(mission) {
+        const THRESHOLD = 16;   // Sıkıştırma eşiği
+        const KEEP_LAST = 6;    // Korunacak son mesaj sayısı
+
+        const history = mission.conversationHistory;
+        if (history.length <= THRESHOLD) return;
+
+        console.log(`📦 Bağlam sıkıştırma tetiklendi (#${mission.id}): ${history.length} mesaj → ~${KEEP_LAST + 1} mesaja düşürülecek.`);
+
+        // Sıkıştırılacak eski mesajları ayır
+        const oldMessages = history.slice(0, -KEEP_LAST);
+        const recentMessages = history.slice(-KEEP_LAST);
+
+        // Eski mesajları okunabilir formata çevir
+        const oldText = oldMessages
+            .filter(m => m.role !== 'system' && !m.content.startsWith('[SİSTEM'))
+            .map(m => `${m.role === 'assistant' ? 'Ajan' : 'Kişi'}: ${m.content}`)
+            .join('\n');
+
+        if (!oldText.trim()) {
+            // Sıkıştırılacak anlamlı içerik yok
+            return;
+        }
+
+        try {
+            const summary = await aiClient.chat([
+                {
+                    role: 'system',
+                    content: `Sen bir konuşma özetleme motorusun. Aşağıdaki WhatsApp sohbetini 3-4 cümle ile Türkçe özetle.
+Özette şunları koru:
+- Kim ne söz verdi (tarih/saat dahil)
+- Karşı tarafın son tutumu
+- Görevle ilgili önemli bilgiler (isim, plaka, miktar vb.)
+- Belirsiz kalan konular
+Gereksiz selamlaşmaları ve tekrarları atla. Sadece özet metni döndür, başka bir şey yazma.`,
+                },
+                { role: 'user', content: oldText },
+            ]);
+
+            // Geçmişi sıkıştırılmış haliyle değiştir
+            mission.conversationHistory = [
+                { role: 'user', content: `[BAĞLAM ÖZETİ — Önceki ${oldMessages.length} mesaj]\n${summary.trim()}` },
+                ...recentMessages,
+            ];
+
+            console.log(`📦 Bağlam sıkıştırıldı (#${mission.id}): ${history.length} → ${mission.conversationHistory.length} mesaj`);
+        } catch (error) {
+            console.warn(`⚠️ Bağlam sıkıştırma hatası (#${mission.id}):`, error.message);
+            // Hata durumunda orijinal geçmişi koru
+        }
     }
 
     /**

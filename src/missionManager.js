@@ -831,8 +831,19 @@ class MissionManager extends EventEmitter {
                     mission.stateMachine = new MissionStateMachine(mission.status || 'active');
                 }
 
+                // ─────────────────────────────────────────────
+                // Runtime-only flagleri sıfırla:
+                // Bu değerler diske kaydediliyor ama gerçek timer'lar
+                // restart'ta kayboluyor. Sıfırlanmazsa mesajlar
+                // ölü kuyruğa düşer (throttle timer yok ama flag true).
+                // ─────────────────────────────────────────────
+                if (!mission.timers) mission.timers = {};
+                mission.timers.throttleTimeoutActive = false;
+                mission.messageQueue = [];
+                mission.firstReplyReceived = false;
+
                 // Zamanlayıcıları kontrol et (Time Travel)
-                const timers = mission.timers || {};
+                const timers = mission.timers;
 
                 // 1. Görev zaman aşımı (Timeout) kontrolü
                 if (timers.missionTimeoutAt) {

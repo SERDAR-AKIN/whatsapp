@@ -1,52 +1,52 @@
 /**
  * @file config.js
- * @description Uygulamanın tüm temel konfigürasyonlarını (sahip bilgileri, varsayılan zaman aşımı değerleri, 
- * komut prefiksleri vb.) barındıran salt okunur yapılandırma nesnesi.
- * Sistemdeki diğer modüller değerleri buradaki sabitlerden okur.
+ * @description A read-only configuration object containing all core configurations
+ * (owner info, default timeout values, command prefixes, etc.) for the application.
+ * Other modules in the system read values from the constants defined here.
  */
 const CONFIG = {
-    // Bot Sahibi Bilgileri
+    // Bot Owner Info
     owner: {
         name: 'Serdar Akın',
-        shortName: 'Serdar',  // Sohbetlerde kullanılacak kısa isim
+        shortName: 'Serdar',  // Short name used in conversations
     },
 
-    // Gemini CLI Ayarları
+    // Gemini CLI Settings
     gemini: {
-        model: 'gemini-2.5-flash', // Veya istediğiniz model adı
+        model: 'gemini-2.5-flash', // Or your preferred model name
     },
 
-    // Görev Varsayılan Ayarları
+    // Mission Default Settings
     mission: {
-        defaultTimeout: 24 * 60 * 60 * 1000,    // 24 saat (ms)
-        defaultMaxMessages: 20,                // Maksimum mesaj sayısı
-        defaultRetryInterval: null,            // Periyodik tekrar (null = yok)
-        defaultMaxRetries: 10,                 // Maksimum tekrar sayısı
-        maxFollowUpDelay: 24 * 60 * 60 * 1000, // Maksimum takip bekleme: 24 saat
+        defaultTimeout: 24 * 60 * 60 * 1000,    // 24 hours (ms)
+        defaultMaxMessages: 20,                  // Maximum message count
+        defaultRetryInterval: null,              // Periodic retry (null = none)
+        defaultMaxRetries: 10,                   // Maximum retry count
+        maxFollowUpDelay: 24 * 60 * 60 * 1000,  // Maximum follow-up wait: 24 hours
     },
 
-    // Kontrol Etiketleri
+    // Control Tags
     tags: {
-        completed: '[GÖREV_TAMAMLANDI]',
-        failed: '[GÖREV_BAŞARISIZ]',
+        completed: '[TASK_COMPLETED]',
+        failed: '[TASK_FAILED]',
     },
 
-    // Komut Prefiksleri
+    // Command Prefixes
     commands: {
         ai: '!ai',
         stop: '!stop',
-        status: '!durum',
-        list: '!liste',
+        status: '!status',
+        list: '!list',
     },
 
-    // Loglama
+    // Logging
     logging: {
         saveToFile: true,
         logDir: './logs',
     },
 
-    // Dil
-    language: 'tr',
+    // Language
+    language: 'en',
 };
 
 module.exports = CONFIG;

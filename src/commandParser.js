@@ -1,5 +1,5 @@
 // ============================================
-// WhatsApp Otonom Ajan Sistemi — Komut Ayrıştırıcı
+// WhatsApp Autonomous Agent System — Command Parser
 // ============================================
 
 const CONFIG = require('./config');
@@ -8,72 +8,73 @@ const GeminiClient = require('./geminiClient');
 const aiClient = new GeminiClient();
 
 /**
- * @description Kullanıcının `!ai` komutunu ayrıştırarak yapılandırılmış bir görev nesnesi (Mission Object) döndürür.
- * Verilen görevi hedef numara veya WhatsApp grubuna göre ayırır. Ardından, LLM'i kullanarak görev metnindeki 
- * örtülü koşulları (`--tone`, `--until` gibi parametreler kullanılmasa bile doğal dilden) çıkarır.
+ * @description Parses the user's `!ai` command and returns a structured mission object.
+ * Separates the given task by target number or WhatsApp group. Then, uses the LLM
+ * to extract implicit conditions from the task text (e.g., `--tone`, `--until` parameters,
+ * even when expressed in natural language).
  *
  * @example
- * const mission = await parseCommand("!ai görev: 90555... Ali'den dosyaları iste", client);
+ * const mission = await parseCommand("!ai task: 90555... Ask Ali for the files", client);
  * console.log(mission.targetChatId); // "90555...@c.us"
- * 
- * @param {string} messageBody - Kullanıcının gönderdiği ham WhatsApp mesajı.
- * @param {Object} client - whatsapp-web.js istemci nesnesi (Grupları aramak için gereklidir).
- * @returns {Promise<Object|null>} - Ayrıştırılmış görev objesi (hata varsa `{ error: '...' }` döner, komut değilse `null` döner).
+ *
+ * @param {string} messageBody - The raw WhatsApp message sent by the user.
+ * @param {Object} client - The whatsapp-web.js client instance (required to search groups).
+ * @returns {Promise<Object|null>} - Parsed mission object (returns `{ error: '...' }` on error, `null` if not a command).
  */
 async function parseCommand(messageBody, client) {
     const body = messageBody.trim();
 
-    // !ai komutu ile başlayıp başlamadığını kontrol et
+    // Check if the message starts with the !ai command
     if (!body.startsWith(CONFIG.commands.ai + ' ')) {
         return null;
     }
 
-    // !ai kısmını çıkar
+    // Strip the !ai prefix
     const content = body.substring(CONFIG.commands.ai.length + 1).trim();
 
-    // Telefon numarasını veya grup kelimesini ayıkla (ilk kelime)
+    // Extract the phone number or group keyword (first word)
     const parts = content.split(/\s+/);
     if (parts.length < 2) {
-        return { error: '❌ Geçersiz format. Kullanım: !ai <numara_veya_grupKelime> <görev açıklaması>' };
+        return { error: '❌ Invalid format. Usage: !ai <number_or_groupKeyword> <task description>' };
     }
 
     const firstWord = parts[0];
     let targetChatId = null;
     let targetNumberOrName = firstWord;
 
-    const rawNumber = firstWord.replace(/[^0-9]/g, ''); // Sadece rakamları al
+    const rawNumber = firstWord.replace(/[^0-9]/g, ''); // Extract digits only
     if (rawNumber.length >= 10 && rawNumber.length <= 15 && rawNumber === firstWord) {
-        // Tamamen rakamlardan oluşuyorsa telefon numarasıdır
+        // Consists entirely of digits → it's a phone number
         targetChatId = `${rawNumber}@c.us`;
         targetNumberOrName = rawNumber;
     } else {
-        // Harf/kelime içeriyorsa grup aramasıdır
+        // Contains letters/words → group search
         if (!client) {
-            return { error: '❌ Grup araması yapılamıyor (istemci bağlı değil).' };
+            return { error: '❌ Group search unavailable (client not connected).' };
         }
-        
+
         try {
             const chats = await client.getChats();
             const groupChats = chats.filter(c => c.isGroup && c.name && c.name.toLowerCase().includes(firstWord.toLowerCase()));
 
             if (groupChats.length === 0) {
-                return { error: `❌ "${firstWord}" kelimesini içeren hiçbir grup bulunamadı.` };
+                return { error: `❌ No group found containing the keyword "${firstWord}".` };
             } else if (groupChats.length > 1) {
                 const names = groupChats.map(c => `"${c.name}"`).join(', ');
-                return { error: `❌ "${firstWord}" kelimesini içeren birden fazla grup bulundu (${groupChats.length} adet). Lütfen daha spesifik bir kelime girin.\nBulunanlar: ${names}` };
+                return { error: `❌ Multiple groups found containing "${firstWord}" (${groupChats.length} total). Please use a more specific keyword.\nFound: ${names}` };
             } else {
                 const targetGroup = groupChats[0];
                 targetChatId = targetGroup.id._serialized;
-                targetNumberOrName = targetGroup.name; // Görünen ad olarak tam grup ismini kullan
+                targetNumberOrName = targetGroup.name; // Use the full group name as display name
             }
         } catch (error) {
-             return { error: `⚠️ Grup listesi alınırken hata oluştu: ${error.message}` };
+             return { error: `⚠️ Error retrieving group list: ${error.message}` };
         }
     }
 
     const taskDescription = parts.slice(1).join(' ');
 
-    // LLM ile görev açıklamasından seçenekleri çıkar
+    // Extract options from task description using LLM
     const options = await extractOptionsWithLLM(taskDescription);
 
     const mission = {
@@ -93,7 +94,7 @@ async function parseCommand(messageBody, client) {
             maxMessages: CONFIG.mission.defaultMaxMessages,
             timeout: CONFIG.mission.defaultTimeout,
             completionCondition: options.completionCondition || null,
-            tone: options.tone || 'nazik ve profesyonel',
+            tone: options.tone || 'polite and professional',
         },
     };
 
@@ -101,29 +102,30 @@ async function parseCommand(messageBody, client) {
 }
 
 /**
- * @description Doğal dille yazılmış görev metnini LLM aracılığıyla analiz ederek, opsiyonel parametreleri (tone, completionCondition, retryInterval) çıkarır.
- * 
+ * @description Analyzes a naturally written task description via LLM to extract
+ * optional parameters (tone, completionCondition, retryInterval).
+ *
  * @example
- * // "15 dakikada bir sor, nazik ol" -> { retryInterval: 900000, tone: "nazik" }
- * 
- * @param {string} taskDescription - Kullanıcının "Ali'den dosyaları iste" gibi serbest metinli görev açıklaması.
- * @returns {Promise<Object>} - LLM tarafından çıkarılan opsiyonel değerler (Çıkarılamazsa boş `{}` döner).
+ * // "ask every 15 minutes, be polite" -> { retryInterval: 900000, tone: "polite" }
+ *
+ * @param {string} taskDescription - The user's free-text task description (e.g., "Ask Ali for the files").
+ * @returns {Promise<Object>} - Optional values extracted by LLM (returns empty `{}` if extraction fails).
  * @private
  */
 async function extractOptionsWithLLM(taskDescription) {
-    const systemPrompt = `Sen bir görev analiz asistanısın. Verilen görev açıklamasını analiz et ve aşağıdaki JSON formatında döndür. Sadece JSON döndür, başka hiçbir şey yazma.
+    const systemPrompt = `You are a task analysis assistant. Analyze the given task description and return it in the following JSON format. Return ONLY the JSON, nothing else.
 
 {
-  "retryInterval": null veya milisaniye cinsinden tekrar süresi (örn: 15 dakika = 900000),
-  "maxRetries": null veya maksimum tekrar sayısı,
-  "completionCondition": "görevin tamamlandığı kabul edilecek koşulun kısa açıklaması" veya null,
-  "tone": "konuşma tonu (örn: samimi, profesyonel, sevecen)"
+  "retryInterval": null or retry duration in milliseconds (e.g., 15 minutes = 900000),
+  "maxRetries": null or maximum number of retries,
+  "completionCondition": "short description of the condition under which the task is considered complete" or null,
+  "tone": "conversation tone (e.g., friendly, professional, warm)"
 }
 
-Örnekler:
-- "15 dakikada bir tekrar sor" → retryInterval: 900000
-- "aldım derse görevi kapat" → completionCondition: "Kişi aldığını teyit ettiğinde"
-- "nazik bir şekilde hatırlat" → tone: "nazik ve profesyonel"`;
+Examples:
+- "ask again every 15 minutes" → retryInterval: 900000
+- "close the task when they confirm receipt" → completionCondition: "When the person confirms receipt"
+- "remind politely" → tone: "polite and professional"`;
 
     try {
         const response = await aiClient.chat([
@@ -131,27 +133,27 @@ async function extractOptionsWithLLM(taskDescription) {
             { role: 'user', content: taskDescription },
         ]);
 
-        // JSON bloğunu cevaptan çıkar
+        // Extract JSON block from the response
         const jsonMatch = response.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
             return JSON.parse(jsonMatch[0]);
         }
     } catch (error) {
-        console.error('⚠️ Görev seçenekleri ayrıştırılamadı, varsayılanlar kullanılacak:', error.message);
+        console.error('⚠️ Could not parse task options, using defaults:', error.message);
     }
 
     return {};
 }
 
 /**
- * @description Kullanıcının çalışan bir görevi manuel olarak iptal etmesini sağlayan `!stop` komutunu ayrıştırır.
- * 
+ * @description Parses the `!stop` command that allows the user to manually cancel a running mission.
+ *
  * @example
  * // "!stop m_12345" -> "m_12345"
  * // "!stop" -> "all"
- * 
- * @param {string} messageBody - Kullanıcının gönderdiği mesaj metni.
- * @returns {string|null} - Durdurulacak görevin spesifik ID'si, tümü için 'all' veya komut değilse null.
+ *
+ * @param {string} messageBody - The message text sent by the user.
+ * @returns {string|null} - The specific ID of the mission to stop, 'all' for all, or null if not a command.
  */
 function parseStopCommand(messageBody) {
     const body = messageBody.trim();
@@ -159,16 +161,17 @@ function parseStopCommand(messageBody) {
 
     const parts = body.split(/\s+/);
     if (parts.length >= 2) {
-        return parts[1]; // Belirli görev ID
+        return parts[1]; // Specific mission ID
     }
-    return 'all'; // ID belirtilmediyse tümünü durdur
+    return 'all'; // Stop all if no ID specified
 }
 
 /**
- * @description Sistem durumunu sorgulayan `!status` veya aktif görevleri listeleyen `!list` gibi yardımcı (utility) komutları kontrol eder.
- * 
- * @param {string} messageBody - Kullanıcının gönderdiği mesaj metni.
- * @returns {string|null} - Tanınan bir komutsa adını (örn: 'status', 'list'), değilse null döner.
+ * @description Checks for utility commands such as `!status` (query system status)
+ * or `!list` (list active missions).
+ *
+ * @param {string} messageBody - The message text sent by the user.
+ * @returns {string|null} - The name of the recognized command (e.g., 'status', 'list'), or null.
  */
 function parseUtilityCommand(messageBody) {
     const body = messageBody.trim();

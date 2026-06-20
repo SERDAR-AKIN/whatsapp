@@ -5,127 +5,127 @@
   <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License"/>
 </div>
 
-# Otonom WhatsApp Ajanı (Gemini Destekli)
+# Autonomous WhatsApp Agent (Powered by Gemini)
 
-> **Elevator Pitch:** WhatsApp üzerinden kendi adınıza pazarlık yapabilen, dosya isteyebilen ve verilen sözleri takip eden tam otonom bir iletişim motoru. Google Gemini AI'nin üstün muhakeme yeteneğini kullanarak, tıpkı insan gibi asenkron iletişim kurar ve görevleri sonuçlandırana kadar peşini bırakmaz.
+> **Elevator Pitch:** A fully autonomous communication engine that can negotiate, request files, and follow up on commitments on your behalf via WhatsApp. Leveraging Google Gemini AI's superior reasoning capabilities, it communicates asynchronously just like a human and keeps following up until tasks are resolved.
 
-## 📖 İçindekiler
-- [✨ Özellikler](#-özellikler)
-- [🚀 Hızlı Başlangıç](#-hızlı-başlangıç)
-- [🏗️ Mimariye Genel Bakış](#️-mimariye-genel-bakış)
-- [💻 Kullanım & API Referansı](#-kullanım--api-referansı)
-- [🤝 Katkıda Bulunma](#-katkıda-bulunma)
-
----
-
-## ✨ Özellikler
-
-- **Tam Otonom İletişim:** Verilen görevi statik komutlarla değil, doğal dil işleme (NLP) yeteneğiyle dinamik olarak yönetir.
-- **Zaman Farkındalığı & Otonom Takip (Follow-up):** Karşı tarafın verdiği süreleri (örn: "yarım saat sonra atarım") analiz eder ve süresi geldiğinde insan doğallığında hatırlatmalar yapar.
-- **Akıllı Mesaj Havuzu (Pooling):** Peş peşe gelen 15 saniye içindeki tüm mesajları birleştirerek tek, tutarlı ve bağlamsal bir cevap üretir. API maliyetlerini düşürür ve "her cümleye ayrı cevap" sorununu ortadan kaldırır.
-- **Hata Toleransı (Resilience):** Sunucu kapansa dahi `data/active_missions.json` üzerinden durum (state) korunur. Açıldığında otonom görevler kaldığı yerden devam eder.
-- **Grup ve Birebir DX:** Grup içi diyaloglarda katılımcıları isimlerinden tanır ve doğrudan ilgili kişiye hitap eder.
+## 📖 Table of Contents
+- [✨ Features](#-features)
+- [🚀 Quick Start](#-quick-start)
+- [🏗️ Architecture Overview](#️-architecture-overview)
+- [💻 Usage & API Reference](#-usage--api-reference)
+- [🤝 Contributing](#-contributing)
 
 ---
 
-## 🚀 Hızlı Başlangıç
+## ✨ Features
 
-### Ön Koşullar
-- **Node.js:** v18.x veya üzeri.
-- **Gemini CLI:** Sistemde global olarak yapılandırılmış, headless modda çalışabilen `gemini` komut satırı aracı.
+- **Fully Autonomous Communication:** Manages assigned tasks dynamically using natural language processing (NLP) rather than static commands.
+- **Time Awareness & Autonomous Follow-up:** Analyzes timeframes given by the other party (e.g., "I'll send it in half an hour") and sends reminders with natural human timing.
+- **Smart Message Pooling:** Combines all messages received within a 15-second window into a single, coherent, contextual response. Reduces API costs and eliminates the "separate reply to every sentence" problem.
+- **Resilience:** State is preserved via `data/active_missions.json` even if the server shuts down. Autonomous tasks resume from where they left off upon restart.
+- **Group and Direct Message Support:** In group conversations, identifies participants by name and addresses the relevant person directly.
 
-### Kurulum ve Çalıştırma
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+- **Node.js:** v18.x or higher.
+- **Gemini CLI:** The `gemini` command-line tool configured globally on the system, capable of running in headless mode.
+
+### Installation & Running
 
 ```bash
-# 1. Repoyu klonlayın
+# 1. Clone the repository
 git clone https://github.com/your-org/whatsapp-autonomous-agent.git
 cd whatsapp-autonomous-agent
 
-# 2. Bağımlılıkları yükleyin
+# 2. Install dependencies
 npm install
 
-# 3. İsteğe bağlı: Konfigürasyonu kendinize göre düzenleyin
+# 3. Optional: Customize the configuration
 nano src/config.js
 
-# 4. Ajanı başlatın
+# 4. Start the agent
 npm start
 ```
 
-Terminalde beliren **QR Kodunu** WhatsApp uygulamanızdan okutarak oturumu bağlayın. (Oturum `.wwebjs_auth` dizininde önbelleğe alınacaktır.)
+Scan the **QR Code** that appears in the terminal with your WhatsApp app to connect the session. (The session will be cached in the `.wwebjs_auth` directory.)
 
 ---
 
-## 🏗️ Mimariye Genel Bakış
+## 🏗️ Architecture Overview
 
-Otonom ajan, yüksek oranda modülerleştirilmiş, olay güdümlü (event-driven) bir mimari üzerine inşa edilmiştir.
+The autonomous agent is built on a highly modularized, event-driven architecture.
 
 ```mermaid
 sequenceDiagram
-    participant U as Kullanıcı (WhatsApp)
+    participant U as User (WhatsApp)
     participant M as Main & MissionManager
     participant CE as ConversationEngine
     participant G as Gemini AI
 
-    U->>M: "!ai görev: Dosyaları iste"
-    M->>CE: Görev (Mission) Oluştur
-    CE->>G: System Prompt + Hedef Analizi
-    G-->>CE: JSON: {"reply": "Merhaba, ..."}
-    CE-->>M: İlk Mesaj
-    M-->>U: Mesaj Gönderilir
+    U->>M: "!ai task: Request the files"
+    M->>CE: Create Mission
+    CE->>G: System Prompt + Goal Analysis
+    G-->>CE: JSON: {"reply": "Hello, ..."}
+    CE-->>M: First Message
+    M-->>U: Message Sent
     
-    Note over M: 15 Sn Geri Sayım (Pooling)
-    U->>M: "Tamam, 30 dk sonra atacağım."
+    Note over M: 15s Countdown (Pooling)
+    U->>M: "Sure, I'll send it in 30 minutes."
     M->>CE: analyzeForFollowUp(history)
-    CE->>G: Süre ve Niyet Analizi
+    CE->>G: Duration and Intent Analysis
     G-->>CE: JSON: {"delayMinutes": 30, "needsFollowUp": true}
-    CE-->>M: Zamanlayıcı Kur (30 dk)
+    CE-->>M: Set Timer (30 min)
 ```
 
-_Daha derin teknik detaylar ve modül analizleri için lütfen [ARCHITECTURE.md](ARCHITECTURE.md) dosyasını inceleyin._
+_For deeper technical details and module analysis, please refer to [ARCHITECTURE.md](ARCHITECTURE.md)._
 
 ---
 
-## 💻 Kullanım & API Referansı
+## 💻 Usage & API Reference
 
-Ajan, kendi bot numaranıza veya botun eklendiği bir gruba gönderdiğiniz **yapılandırılmış komutlarla** (CLI stili argümanlar) tetiklenir.
+The agent is triggered by **structured commands** (CLI-style arguments) sent to your bot number or a group the bot is added to.
 
-### Komut Sözdizimi (Syntax)
+### Command Syntax
 
 ```text
-!ai görev: <Görev Metni> [--tone="..."] [--until="..."]
+!ai task: <Task Text> [--tone="..."] [--until="..."]
 ```
 
-### Argümanlar
+### Arguments
 
-| Argüman | Tip | Zorunlu mu? | Açıklama |
-|---------|-----|-------------|----------|
-| `görev:` | String | ✅ Evet | Botun ne yapmasını istediğinizi anlatan temel metin. |
-| `--tone` | String | ❌ Hayır | İletişim üslubunu belirler (Varsayılan: Kibar ve profesyonel). |
-| `--until` | String | ❌ Hayır | Görevin başarıyla kapanması için gereken "Özel Tamamlanma Koşulu". |
+| Argument | Type | Required? | Description |
+|----------|------|-----------|-------------|
+| `task:` | String | ✅ Yes | The core text describing what you want the bot to do. |
+| `--tone` | String | ❌ No | Sets the communication style (Default: Polite and professional). |
+| `--until` | String | ❌ No | The "Special Completion Condition" required for the task to successfully close. |
 
-### Kullanım Örnekleri
+### Usage Examples
 
-**Temel Görev:**
+**Basic Task:**
 ```whatsapp
-!ai görev: Ali'den dünkü sunum notlarını iste.
+!ai task: Ask Ali for yesterday's presentation notes.
 ```
 
-**Gelişmiş Argümanlı Görev:**
+**Advanced Task with Arguments:**
 ```whatsapp
-!ai görev: Yazılımcıdan son PR'ı onaylamasını iste. 
---tone=Sert, ciddi ve kurumsal
---until=GitHub'dan PR onaylandığına dair ekran görüntüsü atana kadar
+!ai task: Ask the developer to approve the latest PR.
+--tone=Firm, serious, and corporate
+--until=Until a screenshot of the PR approval from GitHub is shared
 ```
 
 ---
 
-## 🤝 Katkıda Bulunma
+## 🤝 Contributing
 
-Bu projenin gelişimine katkıda bulunmak isterseniz:
-1. Repoyu forklayın.
-2. Yeni bir dal (branch) oluşturun (`git checkout -b feature/YeniOzellik`).
-3. Değişikliklerinizi commitleyin (`git commit -m 'feat: Harika bir özellik eklendi'`).
-4. Dalınıza pushlayın (`git push origin feature/YeniOzellik`).
-5. Bir Pull Request oluşturun.
+If you'd like to contribute to this project:
+1. Fork the repository.
+2. Create a new branch (`git checkout -b feature/NewFeature`).
+3. Commit your changes (`git commit -m 'feat: Added a great feature'`).
+4. Push to your branch (`git push origin feature/NewFeature`).
+5. Open a Pull Request.
 
-Lütfen kod standartlarına (ESLint) ve `doc_writer.md` prensiplerine sadık kaldığınızdan emin olun.
+Please make sure to follow code standards (ESLint) and the `doc_writer.md` principles.

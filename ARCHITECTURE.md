@@ -1,19 +1,19 @@
-# Sistem Mimarisi (Architecture Overview)
+# System Architecture Overview
 
-Bu doküman, Gemini destekli Otonom WhatsApp Ajanı'nın iç çalışma prensiplerini, modüler yapısını ve veri kalıcılığı (data persistence) stratejilerini detaylandırmaktadır. Proje, Node.js ekosisteminde olay güdümlü (event-driven) bir mimari ile tasarlanmıştır.
+This document details the internal working principles, modular structure, and data persistence strategies of the Gemini-powered Autonomous WhatsApp Agent. The project is designed with an event-driven architecture in the Node.js ecosystem.
 
-## 🏗️ Çekirdek Akış ve Modüller
+## 🏗️ Core Flow and Modules
 
-Sistem, ayrık sorumluluk prensibine (Separation of Concerns) sıkı sıkıya bağlı 6 ana modülden oluşmaktadır:
+The system consists of 6 main modules strictly adhering to the Separation of Concerns principle:
 
 ```mermaid
 graph TD
-    subgraph "Dış Dünya (External Interfaces)"
+    subgraph "External Interfaces"
         WA[WhatsApp Web API]
         CLI[Gemini CLI Process]
     end
 
-    subgraph "Core İş Katmanı (Business Logic)"
+    subgraph "Core Business Logic"
         M[main.js<br>Gateway]
         CP[commandParser.js<br>Parser]
         MM[missionManager.js<br>State Manager]
@@ -22,12 +22,12 @@ graph TD
         GC[geminiClient.js<br>Process Bridge]
     end
 
-    WA <-->|Mesajlar| M
-    M -->|Ham Komut| CP
+    WA <-->|Messages| M
+    M -->|Raw Command| CP
     CP -->|Parsed DTO| MM
-    MM <-->|Zamanlama İsteği| SCH
-    MM <-->|Bağlam & Geçmiş| CE
-    CE <-->|LLM Formatı| GC
+    MM <-->|Scheduling Request| SCH
+    MM <-->|Context & History| CE
+    CE <-->|LLM Format| GC
     GC -.->|StdIn/StdOut| CLI
 
     classDef core fill:#0f3460,stroke:#e94560,color:#fff
@@ -37,83 +37,83 @@ graph TD
 ```
 
 ### 1. Gateway (`main.js`)
-Sistemin giriş noktasıdır. `whatsapp-web.js` istemcisini ayağa kaldırır, yetkilendirmeyi (QR Auth) yönetir ve gelen tüm trafiği filtreleyip `commandParser` ve `missionManager` modüllerine yönlendirir.
+The system's entry point. Initializes the `whatsapp-web.js` client, manages authentication (QR Auth), and filters all incoming traffic, routing it to the `commandParser` and `missionManager` modules.
 
 ### 2. State Manager (`missionManager.js`)
-Sistemin beynidir. Otonom görevlerin durumlarını (Active, Completed, Failed) izler, bellekteki verileri senkronize eder ve disk tabanlı kalıcılığı (`active_missions.json`) sağlar.
-- **Message Pooling:** Gelen peş peşe mesajları yakalayan ve yığınlaştıran (batching) özel bir zamanlayıcı yönetir.
+The brain of the system. Tracks the statuses of autonomous tasks (Active, Completed, Failed), synchronizes in-memory data, and provides disk-based persistence (`active_missions.json`).
+- **Message Pooling:** Manages a dedicated timer that captures and batches incoming consecutive messages.
 
-### 3. Zeka Motoru (`conversationEngine.js`)
-LLM ile uygulama arasındaki köprüdür. Gelişmiş prompt mühendisliği (Prompt Engineering) tekniklerini barındırır. Otonom kararların alınabilmesi için LLM'e gerekli sınırları, zaman bilgisini ve çıktı kontratlarını zorlar.
+### 3. Intelligence Engine (`conversationEngine.js`)
+The bridge between the LLM and the application. Contains advanced prompt engineering techniques. Forces the LLM to respect required boundaries, time information, and output contracts so that autonomous decisions can be made.
 
 ---
 
-## ⏳ Mesaj Havuzu (Message Pooling) Süreci
+## ⏳ Message Pooling Process
 
-Karşı tarafın peş peşe gönderdiği (örn: "Tamam", "Yarın hallederim", "Saat 10 gibi") mesajlara tek tek saçma cevaplar vermemek ve API maliyetlerini düşürmek için pooling mekanizması kullanılır.
+The pooling mechanism is used to avoid giving separate nonsensical replies to consecutive messages (e.g., "Okay", "I'll handle it tomorrow", "Around 10 AM") and to reduce API costs.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
     
-    Idle --> MessageReceived : Yeni Mesaj Geldi
-    MessageReceived --> Pooling : Kuyruğa Ekle (messageQueue.push)
+    Idle --> MessageReceived : New Message Arrived
+    MessageReceived --> Pooling : Enqueue (messageQueue.push)
     
-    Pooling --> Pooling : 15 Sn İçinde Yeni Mesaj (Drain Reset)
-    Pooling --> Processing : 15 Sn Sessizlik (Timeout Trigger)
+    Pooling --> Pooling : New Message Within 15s (Drain Reset)
+    Pooling --> Processing : 15s Silence (Timeout Trigger)
     
-    Processing --> LLM : Kuyruğu Birleştir (join('\n'))
-    LLM --> Idle : Tek, Bütünsel Yanıt Gönder
+    Processing --> LLM : Merge Queue (join('\n'))
+    LLM --> Idle : Send Single, Unified Response
 ```
 
 ---
 
-## 🧠 Katmanlı Prompt Mimarisi
+## 🧠 Layered Prompt Architecture
 
-`conversationEngine.js` içindeki `buildSystemPrompt` metodu, LLM'in kimliğini ve sınırlarını 5 katmanlı bir mimariyle oluşturur. Bu, LLM'in halüsinasyon görmesini (hallucination) engeller.
+The `buildSystemPrompt` method inside `conversationEngine.js` constructs the LLM's identity and boundaries using a 5-layer architecture. This prevents the LLM from hallucinating.
 
-1. **Kimlik Katmanı:** Botun adı, kimi temsil ettiği.
-2. **Görev Katmanı:** O an çözmeye çalıştığı problem (`taskDescription`).
-3. **Davranış Katmanı:** Üslup kuralları, tekrara düşmeme emirleri.
-4. **Farkındalık Katmanı:** Gelen mesajlara dinamik enjekte edilen `[SAAT: ...]` etiketinin nasıl yorumlanacağı.
-5. **Çıktı Kontratı Katmanı:** Kesin JSON format zorunluluğu.
+1. **Identity Layer:** The bot's name and who it represents.
+2. **Task Layer:** The problem it is currently trying to solve (`taskDescription`).
+3. **Behavior Layer:** Tone rules, anti-repetition directives.
+4. **Awareness Layer:** How to interpret the `[TIME: ...]` tag dynamically injected into incoming messages.
+5. **Output Contract Layer:** Strict JSON format enforcement.
 
-### Çıktı Kontratı (JSON Schema)
+### Output Contract (JSON Schema)
 
-LLM'in verdiği her karar uygulamaya aşağıdaki katı JSON formatında dönmek zorundadır:
+Every decision made by the LLM must return to the application in the following strict JSON format:
 
 ```json
 {
-  "reply": "Karşı tarafa gönderilecek metin",
+  "reply": "Text to be sent to the other party",
   "status": "active | completed | failed",
   "memberStatus": {
-    "Ali": "Dosyaları gönderdi",
-    "Ayşe": "Hafta sonu dönüş yapacak"
+    "Ali": "Sent the files",
+    "Ayse": "Will reply over the weekend"
   }
 }
 ```
 
 > [!WARNING]
-> LLM bazen JSON formatını bozabilir veya içine Markdown bloğu ekleyebilir. `_processResponse` metodu, agresif Regex ve fallback mekanizmalarıyla bu string'i temizleyip parse edilebilir hale getirir.
+> The LLM can sometimes corrupt the JSON format or include a Markdown block inside it. The `_processResponse` method cleans and parses this string into a parseable form using aggressive Regex and fallback mechanisms.
 
 ---
 
-## 💾 Veri Modeli ve Kalıcılık (Data Persistence)
+## 💾 Data Model and Persistence
 
-Sunucu kapanmaları, elektrik kesintileri veya manuel yeniden başlatmalara karşı veri kaybını önlemek için aktif görevler anlık olarak dosyaya yazılır (`data/active_missions.json`).
+To prevent data loss in the event of server shutdowns, power outages, or manual restarts, active tasks are written to disk instantly (`data/active_missions.json`).
 
 ```mermaid
 erDiagram
     MISSION {
-        string id PK "Benzersiz Görev ID"
-        string targetNumber "Karşı tarafın WA numarası"
-        string taskDescription "Asıl Görev Metni"
+        string id PK "Unique Task ID"
+        string targetNumber "Target party's WA number"
+        string taskDescription "Main Task Text"
         string status "active, completed, failed"
-        int messageCount "Toplam gönderilen mesaj"
-        int retryCount "Otonom dürtme sayısı"
-        array conversationHistory "LLM Konuşma Bağlamı"
-        object options "tone, until, vb."
+        int messageCount "Total messages sent"
+        int retryCount "Number of autonomous nudges"
+        array conversationHistory "LLM Conversation Context"
+        object options "tone, until, etc."
     }
 ```
 
-`scheduler.js`, uygulama ilk açıldığında bu JSON dosyasını tarar. Eğer görev `active` ise ve bekleme süresi varsa, zamanlayıcıları (setTimeout) bellek üzerinde yeniden kurar. Böylece ajan, haftalar süren görevleri bile hafızası silinmeden yürütebilir.
+`scheduler.js` scans this JSON file when the application first starts. If a task is `active` and has a pending wait time, it re-establishes the timers (setTimeout) in memory. This allows the agent to execute tasks spanning weeks without losing its state.

@@ -1,9 +1,9 @@
 // ============================================
-// WhatsApp Otonom Ajan Sistemi — Görev Durum Makinesi
+// WhatsApp Autonomous Agent System — Mission State Machine
 // ============================================
 //
-// Görev yaşam döngüsünü kontrol altına alır.
-// Geçersiz durum geçişlerini (örn: completed → active) engeller.
+// Controls the mission lifecycle.
+// Prevents invalid state transitions (e.g., completed → active).
 //
 //                  ┌─────────┐
 //                  │ PENDING │
@@ -19,38 +19,38 @@
 //       └────────┘ └────────┘ └────────┘
 
 /**
- * Geçerli durum geçişleri haritası.
- * Her anahtar bir durum, değeri o durumdan geçilebilen durumlar.
+ * Valid state transitions map.
+ * Each key is a state; its value is the set of states it can transition to.
  * @type {Object<string, string[]>}
  */
 const TRANSITIONS = {
     pending:   ['active', 'failed'],
     active:    ['completed', 'failed', 'stopped'],
-    completed: [], // Terminal durum — geri dönüşü yok
-    failed:    [], // Terminal durum — geri dönüşü yok
-    stopped:   [], // Terminal durum — geri dönüşü yok
+    completed: [], // Terminal state — no way back
+    failed:    [], // Terminal state — no way back
+    stopped:   [], // Terminal state — no way back
 };
 
 /**
- * Terminal (son) durumlar — bu durumlardaki görevler artık işlem göremez.
+ * Terminal states — missions in these states can no longer be processed.
  * @type {string[]}
  */
 const TERMINAL_STATES = ['completed', 'failed', 'stopped'];
 
 class MissionStateMachine {
     /**
-     * @param {string} [initialState='pending'] - Başlangıç durumu
+     * @param {string} [initialState='pending'] - Initial state
      */
     constructor(initialState = 'pending') {
         if (!TRANSITIONS[initialState]) {
-            throw new Error(`Geçersiz başlangıç durumu: "${initialState}". Geçerli durumlar: ${Object.keys(TRANSITIONS).join(', ')}`);
+            throw new Error(`Invalid initial state: "${initialState}". Valid states: ${Object.keys(TRANSITIONS).join(', ')}`);
         }
         this._state = initialState;
         this._history = [{ state: initialState, at: new Date().toISOString(), reason: 'init' }];
     }
 
     /**
-     * Mevcut durumu döndürür.
+     * Returns the current state.
      * @returns {string}
      */
     get state() {
@@ -58,7 +58,7 @@ class MissionStateMachine {
     }
 
     /**
-     * Durum geçiş geçmişini döndürür.
+     * Returns the state transition history.
      * @returns {Array<{state: string, at: string, reason: string}>}
      */
     get history() {
@@ -66,8 +66,8 @@ class MissionStateMachine {
     }
 
     /**
-     * @description Görevin mevcut durumunun terminal (son) bir durum olup olmadığını kontrol eder.
-     * Terminal durumdaki görevler artık hiçbir geçiş yapamaz.
+     * @description Checks whether the mission's current state is a terminal state.
+     * Missions in a terminal state can no longer make any transitions.
      * @returns {boolean}
      */
     get isTerminal() {
@@ -75,8 +75,8 @@ class MissionStateMachine {
     }
 
     /**
-     * @description Belirli bir hedefe geçişin geçerli olup olmadığını kontrol eder.
-     * @param {string} targetState - Hedef durum
+     * @description Checks whether a transition to a specific target state is valid.
+     * @param {string} targetState - Target state
      * @returns {boolean}
      */
     canTransition(targetState) {
@@ -85,22 +85,22 @@ class MissionStateMachine {
     }
 
     /**
-     * @description Durumu değiştirir. Geçersiz geçişlerde hata fırlatır.
-     * 
-     * @param {string} targetState - Hedef durum
-     * @param {string} [reason=''] - Geçiş nedeni (loglama için)
-     * @returns {string} - Yeni durum
-     * @throws {Error} Geçersiz geçiş denendiğinde
+     * @description Changes the state. Throws an error on invalid transitions.
+     *
+     * @param {string} targetState - Target state
+     * @param {string} [reason=''] - Reason for the transition (for logging)
+     * @returns {string} - New state
+     * @throws {Error} When an invalid transition is attempted
      */
     transition(targetState, reason = '') {
         if (!TRANSITIONS[targetState]) {
-            throw new Error(`Bilinmeyen hedef durum: "${targetState}". Geçerli durumlar: ${Object.keys(TRANSITIONS).join(', ')}`);
+            throw new Error(`Unknown target state: "${targetState}". Valid states: ${Object.keys(TRANSITIONS).join(', ')}`);
         }
 
         if (!this.canTransition(targetState)) {
             throw new Error(
-                `Geçersiz durum geçişi: "${this._state}" → "${targetState}". ` +
-                `İzin verilen geçişler: [${(TRANSITIONS[this._state] || []).join(', ')}]`
+                `Invalid state transition: "${this._state}" → "${targetState}". ` +
+                `Allowed transitions: [${(TRANSITIONS[this._state] || []).join(', ')}]`
             );
         }
 
@@ -116,8 +116,8 @@ class MissionStateMachine {
     }
 
     /**
-     * @description Durum makinesini JSON serileştirmeye uygun hale getirir.
-     * restoreMissions() ile geri yüklenebilir.
+     * @description Serializes the state machine for JSON storage.
+     * Can be restored via restoreMissions().
      * @returns {{ state: string, history: Array }}
      */
     toJSON() {
@@ -128,8 +128,8 @@ class MissionStateMachine {
     }
 
     /**
-     * @description JSON'dan durum makinesi oluşturur (hydration).
-     * @param {Object} json - toJSON() çıktısı
+     * @description Creates a state machine from JSON (hydration).
+     * @param {Object} json - Output of toJSON()
      * @returns {MissionStateMachine}
      */
     static fromJSON(json) {

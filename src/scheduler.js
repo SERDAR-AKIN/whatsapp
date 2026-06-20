@@ -1,36 +1,36 @@
 // ============================================
-// WhatsApp Otonom Ajan Sistemi — Zamanlayıcı
+// WhatsApp Autonomous Agent System — Scheduler
 // ============================================
 
 class Scheduler {
     constructor() {
-        // Görev ID → interval ID eşleşmesi
+        // Mission ID → interval ID mapping
         this.intervals = new Map();
-        // Görev ID → timeout ID eşleşmesi (zaman aşımı)
+        // Mission ID → timeout ID mapping (mission timeout)
         this.timeouts = new Map();
-        // Görev ID → timeout ID eşleşmesi (akıllı takip)
+        // Mission ID → timeout ID mapping (smart follow-up)
         this.followUpTimeouts = new Map();
-        // Görev ID → timeout ID eşleşmesi (grup mesajı throttle)
+        // Mission ID → timeout ID mapping (group message throttle)
         this.throttleTimeouts = new Map();
     }
 
     /**
-     * @description Belirli bir görev için periyodik (tekrarlı) takip zamanlayıcısı başlatır.
-     * Kullanıcı `!ai görev` başlatırken `--retryInterval` belirtmişse bu metot kullanılır.
-     * Eğer önceden var olan bir interval varsa, önce onu temizler (Memory leak önlemi).
-     * 
-     * @param {string} missionId - Hedef görevin benzersiz ID'si.
-     * @param {number} intervalMs - İki tekrar arasındaki bekleme süresi (Milisaniye cinsinden).
-     * @param {Function} callback - Süre dolduğunda tetiklenecek fonksiyon.
+     * @description Starts a periodic (recurring) follow-up timer for a specific mission.
+     * Used when the user specifies `--retryInterval` when starting a `!ai task`.
+     * If an existing interval is already running, it clears it first (prevents memory leaks).
+     *
+     * @param {string} missionId - Unique ID of the target mission.
+     * @param {number} intervalMs - Wait time between retries (in milliseconds).
+     * @param {Function} callback - Function to trigger when the interval fires.
      */
     startInterval(missionId, intervalMs, callback) {
-        // Var olan interval varsa temizle
+        // Clear existing interval if present
         this.clearInterval(missionId);
 
-        console.log(`⏰ Zamanlayıcı başlatıldı: ${missionId} — her ${intervalMs / 60000} dakikada bir`);
+        console.log(`⏰ Interval started: ${missionId} — every ${intervalMs / 60000} minutes`);
 
         const id = setInterval(() => {
-            console.log(`⏰ Zamanlayıcı tetiklendi: ${missionId}`);
+            console.log(`⏰ Interval fired: ${missionId}`);
             callback(missionId);
         }, intervalMs);
 
@@ -38,16 +38,16 @@ class Scheduler {
     }
 
     /**
-     * @description Bir görevin maksimum yaşayabileceği (time-to-live) süreyi belirleyen zaman aşımı sayacını başlatır.
-     * Görev çok uzun süre havada kalırsa, bu zamanlayıcı devreye girip görevi zorla `failed` durumuna çeker.
-     * `absoluteTimestamp` parametresi verilirse (sunucu yeniden başlatıldıktan sonra Hydration için), süreyi anlık olarak 
-     * mevcut zamandan çıkararak hesaplar.
-     * 
-     * @param {string} missionId - Hedef görevin benzersiz ID'si.
-     * @param {number} timeoutMs - Zaman aşımı için geçmesi gereken süre (Milisaniye cinsinden).
-     * @param {Function} callback - Süre dolduğunda tetiklenecek fonksiyon (Örn: `_handleTimeout`).
-     * @param {number} [absoluteTimestamp] - (Opsiyonel) Sistemin yeniden başlatılma durumunda eski hedef zaman (Unix Timestamp).
-     * @returns {number} - Tetikleneceği hedeflenen tam zaman (Unix Timestamp).
+     * @description Starts a time-to-live (TTL) timeout for a mission.
+     * If a mission stays active too long, this timer forces it into a `failed` state.
+     * If `absoluteTimestamp` is provided (for hydration after server restart), it calculates
+     * the remaining delay from the current time.
+     *
+     * @param {string} missionId - Unique ID of the target mission.
+     * @param {number} timeoutMs - Duration to wait before timing out (in milliseconds).
+     * @param {Function} callback - Function to trigger when the timeout fires (e.g., `_handleTimeout`).
+     * @param {number} [absoluteTimestamp] - (Optional) The original target time (Unix Timestamp) for restarts.
+     * @returns {number} - The target Unix Timestamp when the timeout will fire.
      */
     startTimeout(missionId, timeoutMs, callback, absoluteTimestamp = null) {
         this.clearTimeout(missionId);
@@ -56,12 +56,12 @@ class Scheduler {
         const targetTime = absoluteTimestamp ? absoluteTimestamp : now + timeoutMs;
         let delay = targetTime - now;
 
-        if (delay <= 0) delay = 1; // Süre geçmişse anında tetikle
+        if (delay <= 0) delay = 1; // Fire immediately if time has already passed
 
-        console.log(`⏳ Zaman aşımı ayarlandı: ${missionId} — ${Math.round(delay / 60000)} dakika`);
+        console.log(`⏳ Timeout set: ${missionId} — ${Math.round(delay / 60000)} minutes`);
 
         const id = setTimeout(() => {
-            console.log(`⏳ Zaman aşımı doldu: ${missionId}`);
+            console.log(`⏳ Timeout expired: ${missionId}`);
             callback(missionId);
         }, delay);
 
@@ -70,16 +70,17 @@ class Scheduler {
     }
 
     /**
-     * @description Akıllı (Otonom) takip zamanlayıcısını başlatır. 
-     * LLM'in `analyzeForFollowUp` metodundan çıkardığı "Kişi yarın sabah dönecek" (Örn: 800 dakika) bilgisini 
-     * alarak gerçek bir Node.js `setTimeout` kurulumu yapar. Süre dolunca bot otonom bir "Hatırlatma" mesajı atar.
-     * 
-     * @param {string} missionId - Hedef görevin benzersiz ID'si.
-     * @param {number} delayMs - LLM'den gelen bekleme süresi (Milisaniye cinsinden).
-     * @param {string} reason - Neden takip yapıldığına dair kısa bilgi ("Dosyayı göndermedi").
-     * @param {Function} callback - Süre dolduğunda çalışacak geri çağırım fonksiyonu.
-     * @param {number} [absoluteTimestamp] - (Opsiyonel) Sistemin yeniden başlatılma durumunda eski hedef zaman (Unix Timestamp).
-     * @returns {number} - Tetikleneceği hedeflenen tam zaman (Unix Timestamp).
+     * @description Starts a smart (autonomous) follow-up timer.
+     * Takes the "Person will reply tomorrow morning" (e.g., 800 minutes) information extracted
+     * by the LLM's `analyzeForFollowUp` method and sets up a real Node.js `setTimeout`.
+     * When the time expires, the bot autonomously sends a reminder message.
+     *
+     * @param {string} missionId - Unique ID of the target mission.
+     * @param {number} delayMs - Wait duration from the LLM (in milliseconds).
+     * @param {string} reason - Brief info about why the follow-up is needed (e.g., "Did not send the file").
+     * @param {Function} callback - Callback function to run when the timer fires.
+     * @param {number} [absoluteTimestamp] - (Optional) The original target time (Unix Timestamp) for restarts.
+     * @returns {number} - The target Unix Timestamp when the follow-up will fire.
      */
     startFollowUpTimeout(missionId, delayMs, reason, callback, absoluteTimestamp = null) {
         this.clearFollowUpTimeout(missionId);
@@ -91,10 +92,10 @@ class Scheduler {
         if (delay <= 0) delay = 1;
 
         const delayMin = Math.round(delay / 60000);
-        console.log(`🔔 Akıllı takip kuruldu: ${missionId} — ${delayMin} dakika sonra (${reason})`);
+        console.log(`🔔 Smart follow-up scheduled: ${missionId} — in ${delayMin} minutes (${reason})`);
 
         const id = setTimeout(() => {
-            console.log(`🔔 Akıllı takip tetiklendi: ${missionId} — ${reason}`);
+            console.log(`🔔 Smart follow-up fired: ${missionId} — ${reason}`);
             this.followUpTimeouts.delete(missionId);
             callback(missionId, reason);
         }, delay);
@@ -104,7 +105,7 @@ class Scheduler {
     }
 
     /**
-     * Belirli bir görevin akıllı takip zamanlayıcısını durdurur.
+     * Stops the smart follow-up timer for a specific mission.
      * @param {string} missionId
      */
     clearFollowUpTimeout(missionId) {
@@ -112,15 +113,15 @@ class Scheduler {
             if (key === missionId || key.startsWith(`${missionId}_`)) {
                 clearTimeout(id);
                 this.followUpTimeouts.delete(key);
-                console.log(`🔔 Akıllı takip iptal edildi: ${key}`);
+                console.log(`🔔 Smart follow-up cancelled: ${key}`);
             }
         }
     }
 
     /**
-     * Grup mesajları için throttle zamanlayıcısı başlatır (tek seferlik).
-     * @param {string} missionId - Görev ID
-     * @param {number} delayMs - Bekleme süresi (ms)
+     * Starts a one-shot throttle timer for group messages.
+     * @param {string} missionId - Mission ID
+     * @param {number} delayMs - Wait duration (ms)
      * @param {Function} callback - () => void
      */
     startThrottleTimeout(missionId, delayMs, callback) {
@@ -135,7 +136,7 @@ class Scheduler {
     }
 
     /**
-     * Belirli bir görevin throttle zamanlayıcısını durdurur.
+     * Stops the throttle timer for a specific mission.
      * @param {string} missionId
      */
     clearThrottleTimeout(missionId) {
@@ -146,19 +147,19 @@ class Scheduler {
     }
 
     /**
-     * Belirli bir görevin periyodik zamanlayıcısını durdurur.
+     * Stops the periodic interval timer for a specific mission.
      * @param {string} missionId
      */
     clearInterval(missionId) {
         if (this.intervals.has(missionId)) {
             clearInterval(this.intervals.get(missionId));
             this.intervals.delete(missionId);
-            console.log(`⏰ Zamanlayıcı durduruldu: ${missionId}`);
+            console.log(`⏰ Interval stopped: ${missionId}`);
         }
     }
 
     /**
-     * Belirli bir görevin zaman aşımı zamanlayıcısını durdurur.
+     * Stops the timeout timer for a specific mission.
      * @param {string} missionId
      */
     clearTimeout(missionId) {
@@ -169,7 +170,7 @@ class Scheduler {
     }
 
     /**
-     * Belirli bir görevin tüm zamanlayıcılarını temizler.
+     * Clears all timers for a specific mission.
      * @param {string} missionId
      */
     clearAll(missionId) {
@@ -180,7 +181,7 @@ class Scheduler {
     }
 
     /**
-     * Tüm görevlerin zamanlayıcılarını temizler.
+     * Clears all timers for all missions.
      */
     clearEverything() {
         for (const [id] of this.intervals) {
@@ -195,7 +196,7 @@ class Scheduler {
         for (const [id] of this.throttleTimeouts) {
             this.clearThrottleTimeout(id);
         }
-        console.log('🧹 Tüm zamanlayıcılar temizlendi.');
+        console.log('🧹 All timers cleared.');
     }
 }
 

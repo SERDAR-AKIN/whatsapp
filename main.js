@@ -1,16 +1,16 @@
 /**
  * @file main.js
- * @description Otonom WhatsApp Ajanı'nın (Gemini Destekli) ana giriş noktasıdır.
- * `whatsapp-web.js` kütüphanesini kullanarak WhatsApp Web oturumunu başlatır, 
- * QR kod ile kimlik doğrulamayı yönetir ve gelen tüm mesaj olaylarını (events) 
- * katmanlı bir middleware pipeline üzerinden işler.
- * 
- * Mimari (Faz 2A):
+ * @description Main entry point of the Autonomous WhatsApp Agent (Powered by Gemini).
+ * Initializes the WhatsApp Web session using the `whatsapp-web.js` library,
+ * manages QR code authentication, and processes all incoming message events
+ * through a layered middleware pipeline.
+ *
+ * Architecture (Phase 2A):
  * ┌──────────┐   ┌───────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
  * │  Guard   │──▶│ Contact   │──▶│   LID    │──▶│  Media   │──▶│ Command/ │
  * │ Filter   │   │ Resolver  │   │ Resolver │   │ Handler  │   │ Mission  │
  * └──────────┘   └───────────┘   └──────────┘   └──────────┘   └──────────┘
- * 
+ *
  * @module MainGateway
  */
 const { Client, LocalAuth } = require('whatsapp-web.js');
@@ -31,7 +31,7 @@ const {
 } = require('./src/messagePipeline');
 const CONFIG = require('./src/config');
 
-// WhatsApp Client oluştur
+// Create WhatsApp Client
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -49,20 +49,20 @@ const client = new Client({
     },
 });
 
-// Görev Yöneticisi
+// Mission Manager
 const missionManager = new MissionManager(client);
 
-// LID Çözümleyici (Merkezi @lid → telefon eşleşme cache'i)
+// LID Resolver (Centralized @lid → phone number mapping cache)
 const lidResolver = new LidResolver(client);
 
-// Gemini bağlantı kontrolü
+// Gemini connection check
 const aiClient = new GeminiClient();
 
 // ════════════════════════════════════════════════════════
-// Middleware Pipeline'ları (Faz 2A)
+// Middleware Pipelines (Phase 2A)
 // ════════════════════════════════════════════════════════
 
-// Pipeline 1: Gelen mesajlar (dışarıdan)
+// Pipeline 1: Incoming messages (from external contacts)
 const incomingPipeline = new MessagePipeline();
 incomingPipeline
     .use('guard', createGuardMiddleware(missionManager))
@@ -72,7 +72,7 @@ incomingPipeline
     .use('mediaHandler', createMediaHandlerMiddleware())
     .use('missionRouter', createMissionRouterMiddleware(missionManager));
 
-// Pipeline 2: Kendi mesajlarım (komut modu)
+// Pipeline 2: My own messages (command mode)
 const selfPipeline = new MessagePipeline();
 selfPipeline
     .use('guard', createGuardMiddleware(missionManager))
@@ -86,29 +86,29 @@ selfPipeline
     .use('selfMissionRouter', createMissionRouterMiddleware(missionManager));
 
 // ════════════════════════════════════════════════════════
-// EventEmitter Dinleyicileri (Faz 2C)
+// EventEmitter Listeners (Phase 2C)
 // ════════════════════════════════════════════════════════
 
 missionManager.on('mission:started', (data) => {
-    console.log(`📡 [EVENT] Görev başladı: #${data.missionId} → ${data.target}`);
+    console.log(`📡 [EVENT] Mission started: #${data.missionId} → ${data.target}`);
 });
 
 missionManager.on('mission:completed', (data) => {
-    console.log(`📡 [EVENT] Görev tamamlandı: #${data.missionId} (${data.status})`);
+    console.log(`📡 [EVENT] Mission completed: #${data.missionId} (${data.status})`);
 });
 
 missionManager.on('mission:stopped', (data) => {
-    console.log(`📡 [EVENT] Görev durduruldu: #${data.missionId}`);
+    console.log(`📡 [EVENT] Mission stopped: #${data.missionId}`);
 });
 
 missionManager.on('mission:reply_sent', (data) => {
     if (data.relevance === 'off_topic') {
-        console.log(`📡 [EVENT] Off-topic yanıt: #${data.missionId}`);
+        console.log(`📡 [EVENT] Off-topic reply: #${data.missionId}`);
     }
 });
 
 // ============================================
-// WhatsApp Olayları
+// WhatsApp Events
 // ============================================
 
 let readyFired = false;
@@ -116,12 +116,12 @@ let authTimeout = null;
 let isRestarting = false;
 
 client.on('qr', (qr) => {
-    console.log('📲 QR Code taratın:');
+    console.log('📲 Scan the QR Code:');
     qrcode.generate(qr, { small: true });
 });
 
 client.on('loading_screen', (percent, message) => {
-    console.log(`⏳ Yükleniyor: %${percent} — ${message}`);
+    console.log(`⏳ Loading: %${percent} — ${message}`);
 });
 
 client.once('ready', async () => {
@@ -130,92 +130,92 @@ client.once('ready', async () => {
     const myNumber = client.info.wid.user;
     missionManager.setMyNumber(myNumber);
 
-    // Gemini sunucu/CLI kontrolü
+    // Gemini server/CLI check
     const aiOk = await aiClient.healthCheck();
     console.log(aiOk
-        ? '🧠 Gemini CLI bağlantısı başarılı ve hazır.'
-        : '⚠️ Gemini CLI ulaşılamıyor veya kurulu değil! Görevler başlatılamayacak.'
+        ? '🧠 Gemini CLI connection successful and ready.'
+        : '⚠️ Gemini CLI is unreachable or not installed! Tasks cannot be started.'
     );
 
-    // Kalıcı hafızayı geri yükle
+    // Restore persistent memory
     missionManager.restoreMissions();
 
-    // LID cache'ini diskten yükle
+    // Load LID cache from disk
     lidResolver.loadFromDisk();
 
     console.log('');
     console.log('═══════════════════════════════════════════');
-    console.log('  ✅ WhatsApp Otonom Ajan Sistemi Hazır!');
+    console.log('  ✅ WhatsApp Autonomous Agent System Ready!');
     console.log('═══════════════════════════════════════════');
-    console.log(`  📱 Hesap : ${myNumber}`);
-    console.log(`  🧠 Model : ${CONFIG.gemini?.model || 'Varsayılan'}`);
-    console.log(`  🌐 Gemini: ${aiOk ? 'Bağlı ✅' : 'Bağlantı Yok ❌'}`);
+    console.log(`  📱 Account : ${myNumber}`);
+    console.log(`  🧠 Model   : ${CONFIG.gemini?.model || 'Default'}`);
+    console.log(`  🌐 Gemini  : ${aiOk ? 'Connected ✅' : 'No Connection ❌'}`);
     console.log(`  🔧 Pipeline: incoming[${incomingPipeline.list().length}] + self[${selfPipeline.list().length}] middleware`);
     console.log('');
-    console.log('  Komutlar:');
-    console.log('  !ai <numara> <görev>  → Yeni görev başlat');
-    console.log('  !stop [id]            → Görevi durdur');
-    console.log('  !durum                → Aktif görevleri listele');
-    console.log('  !liste                → Aktif görevleri listele');
-    console.log('  !ping                 → Bağlantı testi');
+    console.log('  Commands:');
+    console.log('  !ai <number> <task>   → Start a new mission');
+    console.log('  !stop [id]            → Stop a mission');
+    console.log('  !status               → List active missions');
+    console.log('  !list                 → List active missions');
+    console.log('  !ping                 → Connection test');
     console.log('═══════════════════════════════════════════');
     console.log('');
 });
 
 client.on('authenticated', () => {
     if (readyFired || isRestarting) return;
-    console.log('🔐 Kimlik doğrulama başarılı, senkronize ediliyor...');
-    
+    console.log('🔐 Authentication successful, synchronizing...');
+
     if (authTimeout) clearTimeout(authTimeout);
-    
-    // WhatsApp-web.js'te bilinen bir sorun: İlk girişte ready eventi bazen tetiklenmiyor.
-    // Kullanıcının manuel olarak Ctrl+C yapıp tekrar başlatmasını otomatikleştiriyoruz.
+
+    // Known issue in whatsapp-web.js: The ready event sometimes doesn't fire on first login.
+    // We automate what would otherwise require the user to manually Ctrl+C and restart.
     authTimeout = setTimeout(async () => {
         if (!readyFired && !isRestarting) {
             isRestarting = true;
-            console.log('⚠️ Senkronizasyon çok uzun sürdü (ready event alınamadı).');
-            console.log('🔄 İstemci otomatik olarak arka planda yeniden başlatılıyor...');
+            console.log('⚠️ Synchronization took too long (ready event not received).');
+            console.log('🔄 Client is being automatically restarted in the background...');
             try {
                 await client.destroy();
-                // Tarayıcının kapanması için kısa bir süre bekle
+                // Wait briefly for the browser to close
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 isRestarting = false;
                 client.initialize();
             } catch (err) {
-                console.error('❌ Yeniden başlatma başarısız oldu:', err);
+                console.error('❌ Restart failed:', err);
                 isRestarting = false;
             }
         }
-    }, 15000); // 15 saniye bekle
+    }, 15000); // Wait 15 seconds
 });
 
 client.on('auth_failure', (msg) => {
-    console.error('❌ Kimlik doğrulama hatası:', msg);
+    console.error('❌ Authentication error:', msg);
 });
 
 client.on('disconnected', (reason) => {
-    console.log('🔌 Bağlantı kesildi:', reason);
+    console.log('🔌 Disconnected:', reason);
 });
 
 // ============================================
-// Mesaj İşleme (Pipeline Tabanlı — Faz 2A)
+// Message Processing (Pipeline-Based — Phase 2A)
 // ============================================
 
 // ─────────────────────────────────────────────
-// message_create: Tüm mesajlar (giden + gelen)
-// Kullanıcının kendi !ai komutlarını yakalar
+// message_create: All messages (outgoing + incoming)
+// Captures the user's own !ai commands
 // ─────────────────────────────────────────────
 client.on('message_create', async (message) => {
     const fromMe = message.fromMe;
     const chatId = message.from;
     const body = message.body;
 
-    // Sadece kendi mesajlarım (komut modu)
+    // Only my own messages (command mode)
     if (!fromMe) return;
     const myChatId = `${missionManager.myNumber}@c.us`;
     if (chatId !== myChatId) return;
 
-    // Pipeline context oluştur
+    // Build pipeline context
     const context = {
         message,
         chatId,
@@ -232,11 +232,11 @@ client.on('message_create', async (message) => {
 });
 
 // ─────────────────────────────────────────────
-// message: Sadece gelen mesajlar (dışarıdan)
-// Hedef kişiden gelen cevapları yakalar
+// message: Incoming messages only (from external contacts)
+// Captures replies from the target person
 // ─────────────────────────────────────────────
 client.on('message', async (message) => {
-    // Pipeline context oluştur
+    // Build pipeline context
     const context = {
         message,
         chatId: message.from,
@@ -253,9 +253,9 @@ client.on('message', async (message) => {
 });
 
 // ============================================
-// Başlat
+// Start
 // ============================================
 console.log('');
-console.log('🚀 WhatsApp Otonom Ajan Sistemi başlatılıyor...');
+console.log('🚀 WhatsApp Autonomous Agent System starting...');
 console.log('');
 client.initialize();

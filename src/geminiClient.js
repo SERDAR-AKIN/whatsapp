@@ -1,5 +1,5 @@
 // ============================================
-// WhatsApp Otonom Ajan Sistemi — Gemini İstemcisi
+// WhatsApp Autonomous Agent System — Gemini Client
 // ============================================
 
 const { spawn } = require('child_process');
@@ -11,24 +11,24 @@ class GeminiClient {
     }
 
     /**
-     * @description Sistem seviyesinde kurulu olan Gemini CLI aracıyla Node.js `child_process.spawn` üzerinden
-     * asenkron ve headless (arka plan) iletişim kurar. Bu sayede lokal bir LLM veya API anahtarına 
-     * ihtiyaç duymadan Google Gemini'ın gücü kullanılabilir.
-     * 
-     * @param {Array<{role: string, content: string}>} messages - Gönderilecek mesaj geçmişi ve sistem promptu dizisi.
-     * @param {boolean} useJson - Sistemin dönüşünün zorunlu JSON formatında olmasını sağlar (Prompt'a gizli emir ekler).
-     * @returns {Promise<string>} - Gemini CLI'dan dönen standart çıktı (stdout).
-     * @throws {Error} CLI komutu başarısız olursa veya bulunamazsa hata fırlatır.
+     * @description Communicates asynchronously and in headless (background) mode with the
+     * system-level Gemini CLI tool via Node.js `child_process.spawn`. This allows leveraging
+     * the power of Google Gemini without needing a local LLM or an API key.
+     *
+     * @param {Array<{role: string, content: string}>} messages - Array of messages and system prompt to send.
+     * @param {boolean} useJson - Forces the response to be in mandatory JSON format (adds a hidden instruction to the prompt).
+     * @returns {Promise<string>} - Standard output (stdout) from the Gemini CLI.
+     * @throws {Error} Throws an error if the CLI command fails or cannot be found.
      */
     async chat(messages, useJson = false) {
-        // Mesaj geçmişini tek bir prompt olarak birleştir
+        // Merge message history into a single prompt
         let promptText = messages.map(m => {
-            const role = m.role === 'assistant' ? 'Asistan' : m.role === 'system' ? 'Sistem' : 'Kullanıcı';
+            const role = m.role === 'assistant' ? 'Assistant' : m.role === 'system' ? 'System' : 'User';
             return `[${role}]:\n${m.content}`;
         }).join('\n\n');
 
         if (useJson) {
-            promptText += '\n\nÖNEMLİ: Lütfen cevabını SADECE geçerli bir JSON objesi olarak ver. Başında veya sonunda markdown kod bloğu (```json) kullanma, sadece ham JSON metni döndür.';
+            promptText += '\n\nIMPORTANT: Please provide your response as ONLY a valid JSON object. Do not use a markdown code block (```json) at the beginning or end — return only the raw JSON text.';
         }
 
         const args = ['-p', promptText];
@@ -51,15 +51,15 @@ class GeminiClient {
             });
 
             child.on('close', (code) => {
-                // Eğer kod 0 değilse ve stdout boşsa hata fırlat
+                // Throw an error if code is not 0 and stdout is empty
                 if (code !== 0 && !stdoutData.trim()) {
-                    reject(new Error(`Gemini CLI hatası (Kodu: ${code}): ${stderrData}`));
+                    reject(new Error(`Gemini CLI error (Code: ${code}): ${stderrData}`));
                     return;
                 }
 
                 let result = stdoutData.trim();
 
-                // JSON isteniyorsa markdown kod bloklarını temizle
+                // If JSON was requested, strip markdown code blocks
                 if (useJson) {
                     const jsonMatch = result.match(/```(?:json)?\s*([\s\S]*?)```/);
                     if (jsonMatch) {
@@ -71,14 +71,14 @@ class GeminiClient {
             });
 
             child.on('error', (err) => {
-                console.error('❌ Gemini CLI başlatılamadı:', err.message);
+                console.error('❌ Gemini CLI could not be started:', err.message);
                 reject(err);
             });
         });
     }
 
     /**
-     * Gemini CLI'ın erişilebilir olup olmadığını kontrol eder.
+     * Checks whether the Gemini CLI is accessible.
      * @returns {Promise<boolean>}
      */
     async healthCheck() {

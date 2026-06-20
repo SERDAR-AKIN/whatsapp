@@ -1,9 +1,9 @@
 // ============================================
-// WhatsApp Otonom Ajan Sistemi — Mesaj İşleme Pipeline'ı
+// WhatsApp Autonomous Agent System — Message Processing Pipeline
 // ============================================
 //
-// Gelen mesajları katmanlı middleware'ler üzerinden işler.
-// Her middleware bir async fonksiyon: (context, next) => void
+// Processes incoming messages through layered middlewares.
+// Each middleware is an async function: (context, next) => void
 //
 // ┌──────────┐   ┌───────────┐   ┌──────────┐   ┌──────────┐
 // │ Contact  │──▶│   LID     │──▶│  Media   │──▶│ Command  │──▶ ...
@@ -17,32 +17,32 @@ class MessagePipeline {
     }
 
     /**
-     * @description Pipeline'a bir middleware ekler. Middleware'ler ekleme sırasıyla çalışır.
-     * 
-     * @param {string} name - Middleware'in tanımlayıcı adı (loglama için)
+     * @description Adds a middleware to the pipeline. Middlewares run in the order they are added.
+     *
+     * @param {string} name - Identifier name of the middleware (for logging)
      * @param {Function} fn - async (context, next) => void
-     * @returns {MessagePipeline} - Zincirleme çağrı (chaining) desteği
-     * 
+     * @returns {MessagePipeline} - Supports method chaining
+     *
      * @example
      * pipeline.use('logger', async (ctx, next) => {
-     *     console.log(`Mesaj: ${ctx.body}`);
+     *     console.log(`Message: ${ctx.body}`);
      *     await next();
      * });
      */
     use(name, fn) {
         if (typeof fn !== 'function') {
-            throw new Error(`Middleware "${name}" bir fonksiyon olmalıdır.`);
+            throw new Error(`Middleware "${name}" must be a function.`);
         }
         this._middlewares.push({ name, fn });
         return this; // chaining
     }
 
     /**
-     * @description Bir mesajı tüm middleware zincirinden geçirir.
-     * Herhangi bir middleware next() çağırmazsa zincir durur (kısa devre).
-     * 
-     * @param {Object} context - Mesaj bağlamı (message, body, chatId, vb.)
-     * @returns {Promise<Object>} - İşlenmiş context objesi
+     * @description Passes a message through the entire middleware chain.
+     * If any middleware does not call next(), the chain stops (short-circuit).
+     *
+     * @param {Object} context - Message context (message, body, chatId, etc.)
+     * @returns {Promise<Object>} - Processed context object
      */
     async process(context) {
         let index = 0;
@@ -55,9 +55,9 @@ class MessagePipeline {
             try {
                 await current.fn(context, next);
             } catch (error) {
-                console.error(`❌ [Pipeline] Middleware "${current.name}" hatası:`, error.message);
-                // Hata olsa bile zinciri devam ettir (resilience)
-                // next() çağrılmazsa zincir doğal olarak durur
+                console.error(`❌ [Pipeline] Middleware "${current.name}" error:`, error.message);
+                // Continue the chain even on error (resilience)
+                // If next() is not called, the chain naturally stops
             }
         };
 
@@ -66,7 +66,7 @@ class MessagePipeline {
     }
 
     /**
-     * @description Pipeline'daki middleware listesini döndürür.
+     * @description Returns the list of middlewares in the pipeline.
      * @returns {string[]}
      */
     list() {
@@ -75,12 +75,12 @@ class MessagePipeline {
 }
 
 // ════════════════════════════════════════════════════════
-// Hazır Middleware Fabrikaları
+// Ready-made Middleware Factories
 // ════════════════════════════════════════════════════════
 
 /**
- * @description Gelen mesajdan contact bilgisi çıkaran middleware.
- * context.contactNumber ve context.senderName alanlarını doldurur.
+ * @description Middleware that extracts contact info from an incoming message.
+ * Populates the context.contactNumber and context.senderName fields.
  */
 function createContactResolverMiddleware() {
     return async (ctx, next) => {
@@ -91,15 +91,15 @@ function createContactResolverMiddleware() {
                 ctx.senderName = contact.pushname || contact.name || contact.shortName || contact.number;
             }
         } catch (e) {
-            // Hata olursa null kalır
+            // Remains null on error
         }
         await next();
     };
 }
 
 /**
- * @description LID çözümleme middleware'i. LidResolver kullanarak @lid formatını telefon numarasına çevirir.
- * @param {Object} lidResolver - LidResolver instance'ı
+ * @description LID resolution middleware. Converts @lid format to a phone number using LidResolver.
+ * @param {Object} lidResolver - LidResolver instance
  */
 function createLidResolverMiddleware(lidResolver) {
     return async (ctx, next) => {
@@ -111,8 +111,8 @@ function createLidResolverMiddleware(lidResolver) {
 }
 
 /**
- * @description Medya işleme middleware'i. Gelen mesajda fotoğraf, dosya veya ses varsa
- * içeriğini indirir ve context'e meta bilgi ekler.
+ * @description Media handling middleware. If the incoming message contains a photo,
+ * file, or audio, it downloads the content and adds metadata to the context.
  */
 function createMediaHandlerMiddleware() {
     return async (ctx, next) => {
@@ -127,27 +127,27 @@ function createMediaHandlerMiddleware() {
                         data: media.data, // base64 encoded
                     };
 
-                    // Medya tipine göre açıklama oluştur
+                    // Create a description based on media type
                     const typeMap = {
-                        'image': '📷 Fotoğraf',
+                        'image': '📷 Photo',
                         'video': '🎥 Video',
-                        'audio': '🎵 Ses kaydı',
-                        'document': '📄 Dosya',
+                        'audio': '🎵 Audio recording',
+                        'document': '📄 Document',
                         'sticker': '🏷️ Sticker',
                     };
 
                     const mediaType = media.mimetype?.split('/')[0] || 'unknown';
-                    const description = typeMap[mediaType] || `📎 Medya (${media.mimetype})`;
+                    const description = typeMap[mediaType] || `📎 Media (${media.mimetype})`;
                     const filenameInfo = media.filename ? ` — "${media.filename}"` : '';
 
-                    // Mesaj gövdesine medya etiketi ekle
-                    ctx.body = `${ctx.body || ''}\n[MEDYA: ${description}${filenameInfo}]`.trim();
+                    // Append media tag to the message body
+                    ctx.body = `${ctx.body || ''}\n[MEDIA: ${description}${filenameInfo}]`.trim();
                     ctx.hasMedia = true;
 
-                    console.log(`📎 [Medya Algılandı]: ${description}${filenameInfo} (${ctx.chatId})`);
+                    console.log(`📎 [Media Detected]: ${description}${filenameInfo} (${ctx.chatId})`);
                 }
             } catch (error) {
-                console.warn(`⚠️ [Medya İndirme Hatası]: ${error.message}`);
+                console.warn(`⚠️ [Media Download Error]: ${error.message}`);
             }
         }
         await next();
@@ -155,15 +155,15 @@ function createMediaHandlerMiddleware() {
 }
 
 /**
- * @description Boş mesaj ve hazır olmayan bot kontrolü yapan filtre middleware'i.
- * Geçersiz mesajlarda zinciri durdurur (next çağırmaz).
- * @param {Object} missionManager - MissionManager instance'ı (hazırlık kontrolü için)
+ * @description Filter middleware that checks for empty messages and an unready bot.
+ * Stops the chain for invalid messages (does not call next).
+ * @param {Object} missionManager - MissionManager instance (for readiness check)
  */
 function createGuardMiddleware(missionManager) {
     return async (ctx, next) => {
-        // Bot hazır değilse atla
+        // Skip if bot is not ready
         if (!missionManager.myNumber) return;
-        // Boş mesajsa atla
+        // Skip if message is empty
         if (!ctx.body || ctx.body.trim() === '') return;
 
         await next();
@@ -171,15 +171,15 @@ function createGuardMiddleware(missionManager) {
 }
 
 /**
- * @description Komut yönlendirme middleware'i. !ai, !stop, !durum, !ping gibi
- * bot komutlarını yakalar ve işler. Komut ise zinciri durdurur.
+ * @description Command routing middleware. Captures and handles bot commands
+ * like !ai, !stop, !status, !ping. Stops the chain if a command is handled.
  * @param {Object} deps - { client, missionManager, parseCommand, parseStopCommand, parseUtilityCommand }
  */
 function createCommandRouterMiddleware(deps) {
     const { client, missionManager, parseCommand, parseStopCommand, parseUtilityCommand } = deps;
 
     return async (ctx, next) => {
-        // Sadece botun kendi mesajları (komut modu)
+        // Only process the bot's own messages (command mode)
         if (!ctx.fromMe) {
             await next();
             return;
@@ -193,9 +193,9 @@ function createCommandRouterMiddleware(deps) {
 
         const body = ctx.body;
 
-        // !ai komutu: Yeni görev başlat
+        // !ai command: Start a new mission
         if (body.startsWith('!ai ')) {
-            console.log(`\n🎯 Yeni görev komutu alındı: ${body}`);
+            console.log(`\n🎯 New mission command received: ${body}`);
             const mission = await parseCommand(body, client);
             if (!mission) return;
             if (mission.error) {
@@ -205,10 +205,10 @@ function createCommandRouterMiddleware(deps) {
             const statusMsg = await missionManager.startMission(mission);
             await client.sendMessage(myChatId, statusMsg);
             ctx.handled = true;
-            return; // Zinciri durdur
+            return; // Stop the chain
         }
 
-        // !stop komutu
+        // !stop command
         const stopId = parseStopCommand(body);
         if (stopId !== null) {
             const result = missionManager.stopMission(stopId);
@@ -217,7 +217,7 @@ function createCommandRouterMiddleware(deps) {
             return;
         }
 
-        // Yardımcı komutlar (!durum, !liste)
+        // Utility commands (!status, !list)
         const utilCmd = parseUtilityCommand(body);
         if (utilCmd === 'status' || utilCmd === 'list') {
             const report = missionManager.getStatusReport();
@@ -233,18 +233,18 @@ function createCommandRouterMiddleware(deps) {
             return;
         }
 
-        // Komut değilse devam et (self-test kontrolü için)
+        // Not a command, continue (for self-test check)
         await next();
     };
 }
 
 /**
- * @description Gelen mesajı aktif görevlere yönlendiren middleware.
- * @param {Object} missionManager - MissionManager instance'ı
+ * @description Middleware that routes incoming messages to active missions.
+ * @param {Object} missionManager - MissionManager instance
  */
 function createMissionRouterMiddleware(missionManager) {
     return async (ctx, next) => {
-        // Self-test durumunda (kendi mesajım ama komut değil)
+        // In self-test mode (my own message but not a command)
         const overrideChatId = ctx.fromMe ? `${missionManager.myNumber}@c.us` : null;
         const targetChatId = overrideChatId || ctx.chatId;
 
@@ -256,7 +256,7 @@ function createMissionRouterMiddleware(missionManager) {
         );
 
         if (handled) {
-            console.log(`📥 [GÖREV YÖNLENDİRİLDİ] (${targetChatId}): ${ctx.body}`);
+            console.log(`📥 [MISSION ROUTED] (${targetChatId}): ${ctx.body}`);
             ctx.handled = true;
         }
 
@@ -265,16 +265,16 @@ function createMissionRouterMiddleware(missionManager) {
 }
 
 /**
- * @description Gelen mesajı loglayan middleware.
+ * @description Middleware that logs incoming messages.
  */
 function createIncomingLoggerMiddleware() {
     return async (ctx, next) => {
         if (!ctx.fromMe) {
             try {
                 const chat = await ctx.message.getChat();
-                console.log(`\n📨 Gelen mesaj: ${chat.name} (${ctx.chatId}): ${ctx.body}`);
+                console.log(`\n📨 Incoming message: ${chat.name} (${ctx.chatId}): ${ctx.body}`);
             } catch {
-                console.log(`\n📨 Gelen mesaj: (${ctx.chatId}): ${ctx.body}`);
+                console.log(`\n📨 Incoming message: (${ctx.chatId}): ${ctx.body}`);
             }
         }
         await next();
